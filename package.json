@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.8.4",
-  "description": "HBJ chatbot backend — v1.8.4 (kit intent: no options, just question; answer-last)",
+  "version": "1.8.5",
+  "description": "HBJ chatbot backend — v1.8.5 (kit intent: NO options, probe for kit HTML, answer-last strictly)",
   "type": "module",
   "main": "server.js",
   "scripts": {

@@ -1,7 +1,7 @@
-// server.js — HBJ Bot v1.8.4
-// Change: For the "kit" intent, remove the Ear/Nose/Septrum/Tragus chips.
-// Footer now shows ONLY the question: "What kind of piercing kit are you looking for?"
-// Everything else unchanged (answer-last, intents, OOS policy, etc.)
+// server.js — HBJ Bot v1.8.5
+// Kit intent: NO options after the question. Footer ends with the plain question only.
+// Adds /hbj/probe?type=kit to preview the exact HTML for 'piercing kit'.
+// Health shows version 1.8.5.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -333,214 +333,199 @@ function intentOf(q){
 }
 
 // ---------- Route ----------
-app.post('/hbj/chat', async (req, res) => {
-  try {
-    let q = (req.body.q||'').toString().trim();
-    const page = (req.body.page||'').toString();
-    if (/septum/i.test(page)) q += ' septum';
-    if (/tragus/i.test(page)) q += ' tragus';
-    if (/nose/i.test(page)) q += ' nose';
+async function respondForQuery(q){
+  const page = '';
+  let qq = (q||'').toString().trim();
+  if (/septum/i.test(page)) qq += ' septum';
+  if (/tragus/i.test(page)) qq += ' tragus';
+  if (/nose/i.test(page)) qq += ' nose';
 
-    const it = intentOf(q);
+  const it = intentOf(qq);
+  const norm = qq.toLowerCase();
+  const docHit = searchDocs(qq);
+  let kb = null;
+  for (const key of Object.keys((RULES.faqs||{}))) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
 
-    const norm = q.toLowerCase();
-    const docHit = searchDocs(q);
-    let kb = null;
-    for (const key of Object.keys((RULES.faqs||{}))) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
+  let items = [];
+  if (it === 'general' || it === 'sterile') {
+    items = await searchProductsOnDemand(qq);
+  }
 
-    let items = [];
-    if (it === 'general' || it === 'sterile') {
-      items = await searchProductsOnDemand(q);
-    }
+  let sterileHarvest = [];
+  if (it === 'sterile') {
+    sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
+    const urls = new Set(items.map(i=>i.url));
+    for (const itx of sterileHarvest) if (!urls.has(itx.url)) items.push(itx);
+  }
 
-    let sterileHarvest = [];
-    if (it === 'sterile') {
-      sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
-      const urls = new Set(items.map(i=>i.url));
-      for (const itx of sterileHarvest) if (!urls.has(itx.url)) items.push(itx);
-    }
+  let homeKits = [];
+  if (it === 'kit') {
+    homeKits = await harvestHomeSpecialKits();
+  }
 
-    let homeKits = [];
-    if (it === 'kit') {
-      homeKits = await harvestHomeSpecialKits();
-    }
+  const ranked = items.map(p => ({...p, score: scoreAgainstQuery(qq, p)})).sort((a,b)=>b.score-a.score);
+  const oos = ranked.filter(p => p.instock === false).slice(0, 4);
 
-    const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
-    const oos = ranked.filter(p => p.instock === false).slice(0, 4);
+  let topPanel = '';
+  let footer = '';
+  let generalCards = '';
 
-    let topPanel = '';
-    let footer = '';
-    let generalCards = '';
-
-    if (it === 'kit') {
-      const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
-      if (kitsInStock.length){
-        topPanel = `
-          <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
-          <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
-            ${kitsInStock.map(p => `
-              <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-                <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
-                  ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
-                  <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
-                  ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-                </div>
-              </a>
-            `).join('')}
-          </div>`;
-      } else {
-        topPanel = `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing and I’ll show options.</div>`;
-      }
-      // Footer: ONLY the question (no options)
-      footer = `
-        <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
-          <div style="font-weight:700;">What kind of piercing kit are you looking for?</div>
-        </div>`;
-    } else if (it === 'sterile') {
-      const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
-      if (sterileInstock.length){
-        topPanel = `
-          <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
-          <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
-            ${sterileInstock.map(p => `
-              <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-                <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
-                  ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
-                  <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
-                  ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-                </div>
-              </a>
-            `).join('')}
-          </div>`;
-        const sterileCompact = sterileInstock.slice(0,3).map(p => `
-          <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-            <div style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2">
-              ${p.image ? `<img src="${p.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px">` : ''}
-              <div style="flex:1; font-size:13px; line-height:1.25">
-                <div style="font-weight:600">${p.title}</div>
-                ${p.price ? `<div style="opacity:.85; margin-top:2px">${p.price}</div>` : ''}
+  if (it === 'kit') {
+    const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
+    if (kitsInStock.length){
+      topPanel = `
+        <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
+          ${kitsInStock.map(p => `
+            <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+              <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
+                ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+                <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
+                ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
               </div>
-            </div>
-          </a>`).join('');
-        footer = `
-          <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
-            <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
-            ${sterileCompact}
-            <div style="margin-top:8px">
-              <a href="${STERILIZED_CAT}" target="_blank"
-                 style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-                Open Full Sterilized Category
-              </a>
-            </div>
-          </div>`;
-      }
-    } else if (it === 'aftercare') {
-      topPanel = `
-        <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
-          <div style="font-weight:800; margin-bottom:6px">Aftercare Essentials</div>
-          <div style="font-size:13px; line-height:1.45">Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.</div>
-        </div>`;
-      footer = `
-        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
-          <div style="font-weight:800; margin-bottom:6px">Aftercare Quick Tips</div>
-          <ul style="padding-left:18px; margin:0; font-size:13px; line-height:1.45">
-            <li>Rinse twice daily with sterile saline.</li>
-            <li>Don’t twist or rotate jewelry.</li>
-            <li>Sleep on clean linens; avoid pools/hot tubs for 2 weeks.</li>
-          </ul>
-          <div style="margin-top:8px">
-            <a href="${AFTERCARE_URL}" target="_blank"
-               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-              Open Full Aftercare Page
             </a>
-          </div>
-        </div>`;
-    } else if (it === 'shipping') {
-      topPanel = `
-        <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
-          <div style="font-weight:800; margin-bottom:6px">Shipping & Returns</div>
-          <div style="font-size:13px; line-height:1.45">
-            Most orders ship within 1 business day. Returns are limited to unopened/unused items within 7 days; sterile kits are final sale.
-          </div>
-        </div>`;
-      footer = `
-        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
-          <div style="font-weight:800; margin-bottom:6px">Need details?</div>
-          <div style="font-size:13px; line-height:1.45">See full policy, carriers, and timelines.</div>
-          <div style="margin-top:8px">
-            <a href="${SHIPPING_URL}" target="_blank"
-               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-              Open Shipping & Returns Page
-            </a>
-          </div>
-        </div>`;
-    } else if (it === 'course') {
-      const courseUrl = (RULES.course_url||'').trim() || ABOUT_URL;
-      const prev = await getPreview(courseUrl);
-      topPanel = `
-        <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa; display:flex; gap:10px; align-items:center">
-          ${prev.image ? `<img src="${prev.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
-          <div style="flex:1">
-            <div style="font-weight:800; margin-bottom:2px">Master Body Piercing Course</div>
-            <div style="font-size:13px; line-height:1.45">Per owner exception: opening the course page even if it’s out of stock/unavailable.</div>
-          </div>
-        </div>`;
-      footer = `
-        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
-          <div style="font-weight:800; margin-bottom:6px">Open Course Page</div>
-          <a href="${courseUrl}" target="_blank"
-             style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-            Go to Course
-          </a>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px">
-            <a href="${ABOUT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">About Us</a>
-            <a href="${CONTACT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">Contact / Interest List</a>
-          </div>
+          `).join('')}
         </div>`;
     } else {
-      // general
-      const generalInStock = ranked.filter(p => p.instock !== false).slice(0, 5);
-      generalCards = generalInStock.map(p => `
+      topPanel = `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing and I’ll show options.</div>`;
+    }
+    footer = `
+      <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
+        <div style="font-weight:700;">What kind of piercing kit are you looking for?</div>
+      </div>
+      <!-- HBJ v1.8.5: kit footer question only (no option chips) -->`;
+  } else if (it === 'sterile') {
+    const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
+    if (sterileInstock.length){
+      topPanel = `
+        <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
+          ${sterileInstock.map(p => `
+            <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+              <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
+                ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+                <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
+                ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+              </div>
+            </a>
+          `).join('')}
+        </div>`;
+      const sterileCompact = sterileInstock.slice(0,3).map(p => `
         <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-          <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
-            <div style="flex:1">
+          <div style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2">
+            ${p.image ? `<img src="${p.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px">` : ''}
+            <div style="flex:1; font-size:13px; line-height:1.25">
               <div style="font-weight:600">${p.title}</div>
-              ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-              <div style="margin-top:6px"><span style="background:#111;color:#fff;padding:6px 10px;border-radius:8px">View</span></div>
+              ${p.price ? `<div style="opacity:.85; margin-top:2px">${p.price}</div>` : ''}
             </div>
           </div>
-        </a>
-      `).join('');
-    }
-
-    // Direct-ask OOS notice minimal
-    let oosBlock = '';
-    const directOOS = oos.filter(p => looksDirectAsk(q, p.title)).slice(0,2);
-    if (directOOS.length){
-      oosBlock = `
-      <div style="margin:10px 0 6px 0; font-weight:600">Requested item (currently out of stock):</div>
-      ${directOOS.map(p => `
-        <div style="border:1px dashed #f2a; border-radius:12px; padding:10px; margin:6px 0; display:flex; gap:10px; align-items:center; opacity:.85">
-          ${p.image ? `<img src="${p.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
-          <div style="flex:1">
-            <div style="font-weight:600">${p.title} <span style="color:#b00; font-weight:700">— Out of stock</span></div>
-            ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-            <div style="margin-top:6px"><a href="${p.url}" target="_blank" style="text-decoration:underline">View product page</a></div>
+        </a>`).join('');
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+          <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
+          ${sterileCompact}
+          <div style="margin-top:8px">
+            <a href="${STERILIZED_CAT}" target="_blank"
+               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+              Open Full Sterilized Category
+            </a>
           </div>
-        </div>
-      `).join('')}`;
+        </div>`;
     }
-
-    // Final HTML (answer-last)
-    const html = `
-      <div style="font-size:14px">
-        ${topPanel}
-        ${oosBlock}
-        ${generalCards}
-        ${footer}
+  } else if (it === 'aftercare') {
+    const top = `
+      <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
+        <div style="font-weight:800; margin-bottom:6px">Aftercare Essentials</div>
+        <div style="font-size:13px; line-height:1.45">Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.</div>
       </div>`;
+    const foot = `
+      <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+        <div style="font-weight:800; margin-bottom:6px">Aftercare Quick Tips</div>
+        <ul style="padding-left:18px; margin:0; font-size:13px; line-height:1.45">
+          <li>Rinse twice daily with sterile saline.</li>
+          <li>Don’t twist or rotate jewelry.</li>
+          <li>Sleep on clean linens; avoid pools/hot tubs for 2 weeks.</li>
+        </ul>
+        <div style="margin-top:8px">
+          <a href="${AFTERCARE_URL}" target="_blank"
+             style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+            Open Full Aftercare Page
+          </a>
+        </div>
+      </div>`;
+    return `
+      <div style="font-size:14px">
+        ${top}
+        ${foot}
+      </div>`;
+  } else if (it === 'shipping') {
+    const top = `
+      <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
+        <div style="font-weight:800; margin-bottom:6px">Shipping & Returns</div>
+        <div style="font-size:13px; line-height:1.45">
+          Most orders ship within 1 business day. Returns are limited to unopened/unused items within 7 days; sterile kits are final sale.
+        </div>
+      </div>`;
+    const foot = `
+      <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+        <div style="font-weight:800; margin-bottom:6px">Need details?</div>
+        <div style="font-size:13px; line-height:1.45">See full policy, carriers, and timelines.</div>
+        <div style="margin-top:8px">
+          <a href="${SHIPPING_URL}" target="_blank"
+             style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+            Open Shipping & Returns Page
+          </a>
+        </div>
+      </div>`;
+    return `
+      <div style="font-size:14px">
+        ${top}
+        ${foot}
+      </div>`;
+  } else if (it === 'course') {
+    const courseUrl = (RULES.course_url||'').trim() || ABOUT_URL;
+    const prev = await getPreview(courseUrl);
+    const top = `
+      <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa; display:flex; gap:10px; align-items:center">
+        ${prev.image ? `<img src="${prev.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
+        <div style="flex:1">
+          <div style="font-weight:800; margin-bottom:2px">Master Body Piercing Course</div>
+          <div style="font-size:13px; line-height:1.45">Per owner exception: opening the course page even if it’s out of stock/unavailable.</div>
+        </div>
+      </div>`;
+    const foot = `
+      <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+        <div style="font-weight:800; margin-bottom:6px">Open Course Page</div>
+        <a href="${courseUrl}" target="_blank"
+           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+          Go to Course
+        </a>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px">
+          <a href="${ABOUT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">About Us</a>
+          <a href="${CONTACT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">Contact / Interest List</a>
+        </div>
+      </div>`;
+    return `
+      <div style="font-size:14px">
+        ${top}
+        ${foot}
+      </div>`;
+  }
 
+  // Default compose (sterile/general/kit)
+  const html = `
+    <div style="font-size:14px">
+      ${topPanel}
+      ${/* No oosBlock/generalCards after footer; footer is last */''}
+      ${footer}
+    </div>`;
+  return html;
+}
+
+app.post('/hbj/chat', async (req, res) => {
+  try {
+    const q = (req.body.q||'').toString().trim();
+    const html = await respondForQuery(q);
     res.json({ html });
   } catch (e) {
     console.error('Chat error:', e);
@@ -562,6 +547,10 @@ app.get('/hbj/probe', async (req, res) => {
       const kits = await harvestHomeSpecialKits();
       return res.json({ ok:true, type, count: kits.length, sample: kits.slice(0,8) });
     }
+    if (type === 'kit') {
+      const html = await respondForQuery('piercing kit');
+      return res.json({ ok:true, type, html });
+    }
     let url = STERILIZED_CAT;
     if (type === 'prokits') url = PRO_KITS_CAT;
     if (type === 'safekits') url = SAFE_KITS_CAT;
@@ -573,13 +562,13 @@ app.get('/hbj/probe', async (req, res) => {
 });
 
 app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length, version: '1.8.4' });
+  res.json({ ok:true, docs: DOCS.length, version: '1.8.5' });
 });
 
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot v1.8.4 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot v1.8.5 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
