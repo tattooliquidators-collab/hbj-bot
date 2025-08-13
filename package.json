@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "2.0.0",
-  "description": "HBJ chatbot backend \u2014 v2.0.0 (contact form, form CTAs, kit fallbacks, OOS filter)",
+  "version": "2.0.1",
+  "description": "HBJ chatbot backend \u2014 v2.0.1 (contact intent diagnostics, form CTAs, kit fallbacks)",
   "type": "module",
   "main": "server.js",
   "scripts": {

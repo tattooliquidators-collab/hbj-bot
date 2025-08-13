@@ -1,15 +1,8 @@
 
-// server.js — HBJ Bot v2.0.0
-// Features:
-//  • ZERO-404: all CTAs/cards are <form method=GET target=_blank> to direct store URLs (no rewritten anchors)
-//  • One-word kit intents (nose, ear, nipple, clit, genital, etc.) + out-of-stock suppression + resilient fallbacks
-//  • Built-in Contact flow: "contact/email/call" shows a form that posts to /hbj/contact; optional SMTP forward
-//  • High-contrast buttons with inline !important styles; mobile-friendly grids
-//
-// Env (optional for email forwarding):
-//  CONTACT_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
-//
-// Health: GET /hbj/health → { version: "2.0.0" }
+// server.js — HBJ Bot v2.0.1
+// Adds diagnostics + stronger contact triggers.
+// Health: GET /hbj/health → { version: "2.0.1" }
+// Intent debug: GET /hbj/intent?q=... → { intent: "..." }
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -258,7 +251,7 @@ function intentOf(q){
   if (/(aftercare|after care|care instructions|clean|saline|healing)/i.test(s)) return 'aftercare';
   if (/steril/i.test(s)) return 'sterile';
   if (/(course|training|apprentice|class|master class|certification)/i.test(s)) return 'course';
-  if (/(contact|email|e-mail|phone|call|text|reach|message|support|help\s*desk)/i.test(s)) return 'contact';
+  if (/(contact( us)?|email|e-mail|phone|call|text|reach( out)?|message|support|customer\s*service|support\s*team|help\s*desk)/i.test(s)) return 'contact';
   if (/\bkit(s)?\b/i.test(s)) return 'kit';
   const words = s.split(/\s+/).filter(Boolean);
   const oneWord = words.length <= 2 && words.every(w => w.length <= 12);
@@ -309,8 +302,7 @@ function cardHTML(p){
 
 // ---------- Contact composer ----------
 function composeContact(){
-  const action = `${API_BASE}/hbj/contact`;
-  const fallback = `${SITE}/crm.asp?action=contactus`;
+  const action = `${API_BASE}/hbj/contact`; const fallback = `${SITE}/crm.asp?action=contactus`;
   const html = `
     <div style="margin:6px 0 10px 0; font-weight:800">Send us a message</div>
     <form action="${action}" method="POST" target="_blank"
@@ -344,7 +336,7 @@ function composeContact(){
   return shell(html);
 }
 
-// ---------- Composers ----------
+// ---------- Composers (kits, sterile, etc.) ----------
 async function composeKitQuestion(){
   try {
     const homeKits = await harvestHomeSpecialKits();
@@ -371,7 +363,6 @@ async function searchProducts(q){
     const html = await get(url, 5*60*1000);
     const $ = cheerio.load(html);
     let items = parseListing($, url);
-    // Enrich a few
     const enrich = items.slice(0, 8).map(it => it.url);
     const pages = await Promise.all(enrich.map(async (link) => {
       try{
@@ -388,7 +379,6 @@ async function searchProducts(q){
     for (const p of pages) if (p) byUrl.set(p.url, { ...byUrl.get(p.url), ...p });
     return Array.from(byUrl.values());
   } catch (e) {
-    // Fallback: use Pro Kits category and keyword filter
     try {
       const html = await get(PRO_KITS_CAT, 10*60*1000);
       const $ = cheerio.load(html);
@@ -494,11 +484,8 @@ app.post('/hbj/contact', async (req, res) => {
     if (!name || !email || !message || !/@/.test(email)){
       return res.status(400).send('Missing required fields.');
     }
-
-    // Log for audit
     console.log(JSON.stringify({ event:'hbj.contact', name, email, phone, message, ts: new Date().toISOString() }));
 
-    // OPTIONAL: Email forward if SMTP is configured
     try {
       if (process.env.SMTP_HOST && process.env.CONTACT_TO) {
         const nodemailer = (await import('nodemailer')).default;
@@ -516,8 +503,6 @@ app.post('/hbj/contact', async (req, res) => {
         });
       }
     } catch (_) { /* non-fatal */ }
-
-    // Simple thank-you page
     res.set('Content-Type','text/html');
     res.send(`
       <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -535,6 +520,31 @@ app.post('/hbj/contact', async (req, res) => {
 // ---------- API ----------
 function normQuery(q){ return cleanText((q||'').toLowerCase()); }
 
+app.get('/hbj/intent', (req,res)=>{
+  const q = normQuery(String(req.query.q||''));
+  let intent = 'general';
+  try { intent = (function(){
+    const s = q.toLowerCase().trim();
+    if (/(shipping|returns?|return policy|refund|exchange|delivery|how long.*ship|ship.*time)/i.test(s)) return 'shipping';
+    if (/(aftercare|after care|care instructions|clean|saline|healing)/i.test(s)) return 'aftercare';
+    if (/steril/i.test(s)) return 'sterile';
+    if (/(course|training|apprentice|class|master class|certification)/i.test(s)) return 'course';
+    if (/(contact( us)?|email|e-mail|phone|call|text|reach( out)?|message|support|customer\s*service|support\s*team|help\s*desk)/i.test(s)) return 'contact';
+    if (/\bkit(s)?\b/i.test(s)) return 'kit';
+    const words = s.split(/\s+/).filter(Boolean);
+    const KIT_WORDS = new Set([
+      'ear','nose','nostril','septum','tragus','daith','rook','industrial','eyebrow','brow',
+      'tongue','lip','labret','monroe','smiley','frenulum','medusa','philtrum',
+      'navel','belly','bellybutton','belly-button',
+      'nipple','genital','clit','clitoral','vch','hch','christina','prince','apadravya','ampallang'
+    ]);
+    const oneWord = words.length <= 2 && words.every(w => w.length <= 12);
+    if (oneWord && words.some(w => KIT_WORDS.has(w))) return 'kit_type';
+    return 'general';
+  })(); } catch {}
+  res.json({ intent, q });
+});
+
 app.post('/hbj/chat', async (req, res) => {
   try {
     const q = (req.body.q||'').toString().trim();
@@ -550,7 +560,7 @@ app.post('/hbj/chat', async (req, res) => {
     else if (intent === 'contact') html = composeContact();
     else if (intent === 'kit') html = await composeKitQuestion();
     else if (intent === 'kit_type') {
-      const word = key.split(/\s+/).find(w => KIT_WORDS.has(w)) || 'piercing';
+      const word = key.split(/\s+/).find(w => new Set(['ear','nose','nostril','septum','tragus','daith','rook','industrial','eyebrow','brow','tongue','lip','labret','monroe','smiley','frenulum','medusa','philtrum','navel','belly','bellybutton','belly-button','nipple','genital','clit','clitoral','vch','hch','christina','prince','apadravya','ampallang']).has(w)) || 'piercing';
       html = await composeKitType(word);
     } else {
       html = shell(`<div>Tell me what you’re looking for and I’ll pull it up.</div>`);
@@ -562,7 +572,7 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '2.0.0', api_base: API_BASE }));
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '2.0.1', api_base: API_BASE }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
