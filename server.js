@@ -1,8 +1,6 @@
-// server.js — HBJ Bot Hotfix v1.7.8
-// Guarantee: the LAST visible part is the correct answer (so users don't have to scroll up).
-// - Sterilized flow: show gallery at top, and again a compact "Top Picks" footer + CTA at the very bottom. No generic recs.
-// - Aftercare flow: show panel at top, and a compact bullet + CTA footer at the bottom. No generic recs.
-// - Retains price parsing, category harvesting, OOS policy (only on direct ask), exact links.
+// server.js — HBJ Bot v1.8.2 (full bundle)
+// Intents: shipping, aftercare, sterile, course (exception), general
+// Rules: answer-last guarantee; OOS shown only on direct ask; exact CTAs; probes for sanity checks
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -37,10 +35,15 @@ const STERILIZED_CAT = `${SITE}/Sterilized-Body-Jewelry_c_42.html`;
 const PRO_KITS_CAT = `${SITE}/Professional-Piercing-Kits_c_7.html`;
 const SAFE_KITS_CAT = `${SITE}/Safe-and-Sterile-Piercing-Kits_c_1.html`;
 const AFTERCARE_URL = `${SITE}/Aftercare_ep_42-1.html`;
+const SHIPPING_URL = `${SITE}/Shipping-and-Returns_ep_43-1.html`;
+const ABOUT_URL = `${SITE}/About-Us_ep_7.html`;
+const CONTACT_URL = `${SITE}/crm.asp?action=contactus`;
+const VIDEOS_URL = `${SITE}/Body-Piercing-Videos_ep_40.html`;
+
 let DOCS = []; // {url, title, text, image}
 
 // ---------- Rules / KB ----------
-let RULES = { faqs:{}, promote_first:[] };
+let RULES = { faqs:{}, promote_first:[], aliases:{}, course_url:'' };
 try { RULES = JSON.parse(fs.readFileSync('./rules.json','utf8')); } catch {}
 
 // ---------- Pages config ----------
@@ -62,6 +65,21 @@ async function get(url){
   if (!r.ok) throw new Error(`GET ${url} ${r.status}`);
   return await r.text();
 }
+async function getPreview(url){
+  try{
+    const h = await get(url);
+    const $ = cheerio.load(h);
+    const title = cleanText($('title').first().text()) || url;
+    let img = $('meta[property="og:image"]').attr('content') ||
+              $('img[data-src]').first().attr('data-src') ||
+              $('img[src*="/assets/images"]').first().attr('src') ||
+              $('img[src]').first().attr('src') || '';
+    if (img) img = abs(img, url);
+    return { title, image: img };
+  }catch{
+    return { title: url, image: '' };
+  }
+}
 
 function extractImage($$ , pageUrl){
   let img = $$('meta[property="og:image"]').attr('content');
@@ -74,7 +92,7 @@ function extractImage($$ , pageUrl){
   return img ? abs(img, pageUrl) : '';
 }
 
-// Robust price finder: prefer schema/meta, else prefer "sale/now/your price", else pick the smallest $
+// Robust price finder
 function extractPrice($$){
   let content = $$('meta[itemprop="price"]').attr('content') ||
                 $$('[itemprop=price]').first().text();
@@ -128,7 +146,8 @@ const SYN = {
   ring: ['ring','captive','captive bead','cbr','segment'],
   barbell: ['barbell','straight barbell','curved barbell','banana'],
   sterile: ['sterile','sterilized','pre-sterilized','pre sterilized','sterilization'],
-  kit: ['kit','piercing kit','ear piercing kit','ear kit','ear-piercing kit','professional kit']
+  kit: ['kit','piercing kit','ear piercing kit','ear kit','ear-piercing kit','professional kit'],
+  course: ['course','training','class','apprentice','certification','master class']
 };
 function parseGauge(q){ const m = q.match(/\b(10|12|14|16|18|20|22|8|6)\s*g\b/i); return m ? m[1] : null; }
 
@@ -144,7 +163,7 @@ function looksDirectAsk(q, title){
   return tokenOverlap(q, title) >= 3;
 }
 
-// ---------- Pages ingestion (with preview image) ----------
+// ---------- Pages ingestion ----------
 async function loadPages() {
   DOCS = [];
   for (const entry of (PAGES.pages || [])) {
@@ -166,10 +185,11 @@ function scoreDoc(q, d){
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   let s = 0, hay = d.text.toLowerCase();
   for (const t of terms) if (hay.includes(t)) s += 2;
-  if (/ship|delivery|return|refund/i.test(q) && /ship|return|refund/i.test(hay)) s += 5;
+  if (/ship|delivery|return|refund|exchange/i.test(q) && /ship|return|refund|exchange/i.test(hay)) s += 5;
   if (/aftercare|after care|clean|saline|healing/i.test(q) && /aftercare|clean|saline|healing/i.test(hay)) s += 5;
   if (/steril/i.test(q) && /steril/i.test(hay)) s += 5;
   if (/kit/i.test(q) && /kit/i.test(hay)) s += 3;
+  if (/course|training|apprentice|class|certification/i.test(q) && /course|training|apprentice|class|certification/i.test(hay)) s += 4;
   return s;
 }
 function searchDocs(q){
@@ -255,7 +275,18 @@ function scoreAgainstQuery(q, p){
   const g = parseGauge(q); if (g && t.includes(`${g}g`)) s += 3;
   if (/kit\b/i.test(ql) && /kit\b/i.test(t)) s += 4;
   if (/steril/i.test(ql) && /steril/i.test(t)) s += 6; // boost sterile
+  if (/course|training|class/i.test(ql) && /course|training|class/i.test(t)) s += 5;
   return s;
+}
+
+// ---------- Intents ----------
+function intentOf(q){
+  const s = q.toLowerCase();
+  if (/(shipping|returns?|return policy|refund|exchange|delivery|how long.*ship|ship.*time)/i.test(s)) return 'shipping';
+  if (/(aftercare|after care|care instructions|clean|saline|healing)/i.test(s)) return 'aftercare';
+  if (/steril/i.test(s)) return 'sterile';
+  if (/(course|training|apprentice|class|master class|certification)/i.test(s)) return 'course';
+  return 'general';
 }
 
 // ---------- Route ----------
@@ -263,45 +294,44 @@ app.post('/hbj/chat', async (req, res) => {
   try {
     let q = (req.body.q||'').toString().trim();
     const page = (req.body.page||'').toString();
-
     if (/septum/i.test(page)) q += ' septum';
     if (/tragus/i.test(page)) q += ' tragus';
     if (/nose/i.test(page)) q += ' nose';
 
-    const looksHowTo = /(how to|tutorial|step by step|pierce.*myself)/i.test(q);
-    const safety = looksHowTo ? `<div style="margin:8px 0; font-size:12px; opacity:.8">Educational info only. We don’t endorse self-piercing. Consider a licensed professional.</div>` : '';
+    const it = intentOf(q);
 
     // Docs & KB
+    const norm = q.toLowerCase();
     const docHit = searchDocs(q);
-    const norm = q.toLowerCase().replace(/[^\w\s]/g,'').trim();
     let kb = null;
-    for (const key of Object.keys(RULES.faqs||{})) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
+    for (const key of Object.keys((RULES.faqs||{}))) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
 
-    // Products via on-demand search
-    let items = await searchProductsOnDemand(q);
-
-    // Flags
-    const mentionSterile = /steril/i.test(q);
-    const wantAftercare = /(aftercare|after care|care instructions|clean|saline|healing)/i.test(q);
-
-    // Sterile: harvest category
-    let sterileHarvest = [];
-    if (mentionSterile) {
-      sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
-      const urls = new Set(items.map(i=>i.url));
-      for (const it of sterileHarvest) if (!urls.has(it.url)) items.push(it);
+    // Products (only used in general/sterile)
+    let items = [];
+    if (it === 'general' || it === 'sterile') {
+      items = await searchProductsOnDemand(q);
     }
 
-    // Score (still used for direct OOS handling in special flows)
+    // Sterile harvest
+    let sterileHarvest = [];
+    if (it === 'sterile') {
+      sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
+      const urls = new Set(items.map(i=>i.url));
+      for (const itx of sterileHarvest) if (!urls.has(itx.url)) items.push(itx);
+    }
+
     const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
     const oos = ranked.filter(p => p.instock === false).slice(0, 4);
 
-    // Sterilized gallery (top)
-    let sterileGalleryTop = '';
-    if (mentionSterile && sterileHarvest.length){
-      const sterileInstock = sterileHarvest.filter(p => p.instock !== false).slice(0, 10);
+    // Panels by intent
+    let topPanel = '';
+    let footer = '';
+    let generalCards = '';
+
+    if (it === 'sterile') {
+      const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
       if (sterileInstock.length){
-        sterileGalleryTop = `
+        topPanel = `
           <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
           <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
             ${sterileInstock.map(p => `
@@ -314,22 +344,109 @@ app.post('/hbj/chat', async (req, res) => {
               </a>
             `).join('')}
           </div>`;
+        const sterileCompact = sterileInstock.slice(0,3).map(p => `
+          <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+            <div style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2">
+              ${p.image ? `<img src="${p.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px">` : ''}
+              <div style="flex:1; font-size:13px; line-height:1.25">
+                <div style="font-weight:600">${p.title}</div>
+                ${p.price ? `<div style="opacity:.85; margin-top:2px">${p.price}</div>` : ''}
+              </div>
+            </div>
+          </a>`).join('');
+        footer = `
+          <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+            <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
+            ${sterileCompact}
+            <div style="margin-top:8px">
+              <a href="${STERILIZED_CAT}" target="_blank"
+                 style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+                Open Full Sterilized Category
+              </a>
+            </div>
+          </div>`;
       }
-    }
-
-    // Aftercare panel (top)
-    let aftercarePanelTop = '';
-    if (wantAftercare) {
-      const acDoc = DOCS.find(d => (d.url||'').includes('Aftercare_ep_42-1.html')) || docHit;
-      const acSnippet = acDoc ? acDoc.text.slice(0, 600) : 'Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.';
-      aftercarePanelTop = `
+    } else if (it === 'aftercare') {
+      topPanel = `
         <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
           <div style="font-weight:800; margin-bottom:6px">Aftercare Essentials</div>
-          <div style="font-size:13px; line-height:1.45">${acSnippet}...</div>
+          <div style="font-size:13px; line-height:1.45">Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.</div>
         </div>`;
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+          <div style="font-weight:800; margin-bottom:6px">Aftercare Quick Tips</div>
+          <ul style="padding-left:18px; margin:0; font-size:13px; line-height:1.45">
+            <li>Rinse twice daily with sterile saline.</li>
+            <li>Don’t twist or rotate jewelry.</li>
+            <li>Sleep on clean linens; avoid pools/hot tubs for 2 weeks.</li>
+          </ul>
+          <div style="margin-top:8px">
+            <a href="${AFTERCARE_URL}" target="_blank"
+               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+              Open Full Aftercare Page
+            </a>
+          </div>
+        </div>`;
+    } else if (it === 'shipping') {
+      topPanel = `
+        <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
+          <div style="font-weight:800; margin-bottom:6px">Shipping & Returns</div>
+          <div style="font-size:13px; line-height:1.45">
+            Most orders ship within 1 business day. Returns are limited to unopened/unused items within 7 days; sterile kits are final sale.
+          </div>
+        </div>`;
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+          <div style="font-weight:800; margin-bottom:6px">Need details?</div>
+          <div style="font-size:13px; line-height:1.45">See full policy, carriers, and timelines.</div>
+          <div style="margin-top:8px">
+            <a href="${SHIPPING_URL}" target="_blank"
+               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+              Open Shipping & Returns Page
+            </a>
+          </div>
+        </div>`;
+    } else if (it === 'course') {
+      const courseUrl = (RULES.course_url||'').trim() || ABOUT_URL;
+      const prev = await getPreview(courseUrl);
+      topPanel = `
+        <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa; display:flex; gap:10px; align-items:center">
+          ${prev.image ? `<img src="${prev.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
+          <div style="flex:1">
+            <div style="font-weight:800; margin-bottom:2px">Master Body Piercing Course</div>
+            <div style="font-size:13px; line-height:1.45">Per owner exception: opening the course page even if it’s out of stock/unavailable.</div>
+          </div>
+        </div>`;
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+          <div style="font-weight:800; margin-bottom:6px">Open Course Page</div>
+          <a href="${courseUrl}" target="_blank"
+             style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+            Go to Course
+          </a>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px">
+            <a href="${ABOUT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">About Us</a>
+            <a href="${CONTACT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">Contact / Interest List</a>
+          </div>
+        </div>`;
+    } else {
+      // general
+      const generalInStock = ranked.filter(p => p.instock !== false).slice(0, 5);
+      generalCards = generalInStock.map(p => `
+        <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+          <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
+            ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
+            <div style="flex:1">
+              <div style="font-weight:600">${p.title}</div>
+              ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+              <div style="margin-top:6px"><span style="background:#111;color:#fff;padding:6px 10px;border-radius:8px">View</span></div>
+            </div>
+          </div>
+        </a>
+      `).join('');
     }
 
-    // Direct-ask OOS notice (minimal, above footers)
+    // Direct-ask OOS notice minimal
     let oosBlock = '';
     const directOOS = oos.filter(p => looksDirectAsk(q, p.title)).slice(0,2);
     if (directOOS.length){
@@ -347,81 +464,13 @@ app.post('/hbj/chat', async (req, res) => {
       `).join('')}`;
     }
 
-    // FOOTERS (these are intentionally LAST in the message)
-    let footer = '';
-    if (mentionSterile) {
-      // Compact top picks (3) + CTA so the bottom is always relevant
-      const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 3);
-      const compact = sterileInstock.map(p => `
-        <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-          <div style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px">` : ''}
-            <div style="flex:1; font-size:13px; line-height:1.25">
-              <div style="font-weight:600">${p.title}</div>
-              ${p.price ? `<div style="opacity:.85; margin-top:2px">${p.price}</div>` : ''}
-            </div>
-          </div>
-        </a>
-      `).join('');
-      footer = `
-        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
-          <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
-          ${compact}
-          <div style="margin-top:8px">
-            <a href="${STERILIZED_CAT}" target="_blank"
-               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-              Open Full Sterilized Category
-            </a>
-          </div>
-        </div>`;
-    } else if (wantAftercare) {
-      footer = `
-        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
-          <div style="font-weight:800; margin-bottom:6px">Aftercare Quick Tips</div>
-          <ul style="padding-left:18px; margin:0; font-size:13px; line-height:1.45">
-            <li>Rinse twice daily with sterile saline.</li>
-            <li>Don’t twist or rotate jewelry.</li>
-            <li>Sleep on clean linens; avoid pools/hot tubs for 2 weeks.</li>
-          </ul>
-          <div style="margin-top:8px">
-            <a href="${AFTERCARE_URL}" target="_blank"
-               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-              Open Full Aftercare Page
-            </a>
-          </div>
-        </div>`;
-    }
-
-    // Default general mode (when not sterile/aftercare): show up to 5 generic cards
-    let generalCards = '';
-    if (!(mentionSterile || wantAftercare)) {
-      const generalInStock = ranked.filter(p => p.instock !== false).slice(0, 5);
-      generalCards = generalInStock.map(p => `
-        <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-          <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
-            <div style="flex:1">
-              <div style="font-weight:600">${p.title}</div>
-              ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-              <div style="margin-top:6px"><span style="background:#111;color:#fff;padding:6px 10px;border-radius:8px">View</span></div>
-            </div>
-          </div>
-        </a>
-      `).join('');
-    }
-
-    const defaultBlurb = `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
-
-    // ORDER (important): TOP panels → OOS → (general cards only in general mode) → FOOTER (answer again)  ← last thing shown
+    // Final HTML (answer-last)
     const html = `
       <div style="font-size:14px">
-        ${mentionSterile ? sterileGalleryTop : ''}
-        ${wantAftercare ? aftercarePanelTop : ''}
+        ${topPanel}
         ${oosBlock}
         ${generalCards}
         ${footer}
-        ${!(mentionSterile || wantAftercare) ? `<div style="margin:6px 0; opacity:.85">${kb || defaultBlurb}</div>` : ''}
-        ${looksHowTo ? `<div style="margin:6px 0; font-size:12px; opacity:.8">Educational info only. We don’t endorse self-piercing. Consider a licensed professional.</div>` : ''}
       </div>`;
 
     res.json({ html });
@@ -435,6 +484,12 @@ app.post('/hbj/chat', async (req, res) => {
 app.get('/hbj/probe', async (req, res) => {
   try {
     const type = (req.query.type || 'sterile').toString();
+    if (type === 'shipping') {
+      return res.json({ ok:true, type, url: '${SHIPPING_URL}' });
+    }
+    if (type === 'course') {
+      return res.json({ ok:true, type, course_url: (JSON.parse(fs.readFileSync('./rules.json','utf8')).course_url || '') });
+    }
     let url = STERILIZED_CAT;
     if (type === 'prokits') url = PRO_KITS_CAT;
     if (type === 'safekits') url = SAFE_KITS_CAT;
@@ -446,13 +501,13 @@ app.get('/hbj/probe', async (req, res) => {
 });
 
 app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length });
+  res.json({ ok:true, docs: DOCS.length, version: '1.8.2' });
 });
 
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot Hotfix v1.7.8 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot v1.8.2 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;

@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.7.8",
-  "description": "HBJ chatbot backend — hotfix v1.7.8 (answer-last guarantee; compact footer picks/CTA)",
+  "version": "1.8.2",
+  "description": "HBJ chatbot backend — v1.8.2 full bundle (shipping intent, aftercare, sterile gallery, course exception, answer-last)",
   "type": "module",
   "main": "server.js",
   "scripts": {

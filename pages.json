@@ -23,6 +23,14 @@
     {
       "url": "https://www.hottiebodyjewelry.com/Professional-Piercing-Kits_c_7.html",
       "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/About-Us_ep_7.html",
+      "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/Body-Piercing-Videos_ep_40.html",
+      "selector": "body"
     }
   ]
 }
