@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.7.0",
-  "description": "HBJ chatbot backend — hotfix v1.7.0 (category harvesting + page previews + OOS policy)",
+  "version": "1.7.2",
+  "description": "HBJ chatbot backend — hotfix v1.7.2 (price parser + sterile priority)",
   "type": "module",
   "main": "server.js",
   "scripts": {

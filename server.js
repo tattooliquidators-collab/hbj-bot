@@ -1,7 +1,5 @@
-// server.js — HBJ Bot Hotfix v1.7.0
-// - On-demand product search AND category harvesting (sterilized jewelry + ear piercing kits)
-// - Page answers show snippet + link + preview image
-// - Recommends only in-stock/unknown; OOS shown ONLY on direct ask (with image)
+// server.js — HBJ Bot Hotfix v1.7.2
+// Fixes price parsing (no more "149.9959.95"), strengthens sterile category display.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -32,6 +30,9 @@ app.use(cors({
 
 // ---------- Globals ----------
 const SITE = 'https://www.hottiebodyjewelry.com';
+const STERILIZED_CAT = `${SITE}/Sterilized-Body-Jewelry_c_42.html`;
+const PRO_KITS_CAT = `${SITE}/Professional-Piercing-Kits_c_7.html`;
+const SAFE_KITS_CAT = `${SITE}/Safe-and-Sterile-Piercing-Kits_c_1.html`;
 let DOCS = []; // {url, title, text, image}
 
 // ---------- Rules / KB ----------
@@ -44,18 +45,23 @@ try { PAGES = JSON.parse(fs.readFileSync('./pages.json','utf8')); } catch {}
 
 // ---------- Helpers ----------
 function cleanText(t=''){ return t.replace(/\s+/g,' ').replace(/\u00a0/g,' ').trim(); }
-function normalizePrice(txt=''){
-  const s = (txt||'').replace(/[^\d\.\,]/g,'').trim();
-  if (!s) return '';
-  return s.startsWith('$') ? s : `$${s}`;
-}
 function abs(url, base){ try { return new URL(url, base).href; } catch { return url; } }
 
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9'
+};
+
+async function get(url){
+  const r = await fetch(url, { redirect: 'follow', headers: HEADERS });
+  if (!r.ok) throw new Error(`GET ${url} ${r.status}`);
+  return await r.text();
+}
+
 function extractImage($$ , pageUrl){
-  // 1) OpenGraph
   let img = $$('meta[property="og:image"]').attr('content');
   if (img) return abs(img, pageUrl);
-  // 2) Common product/article image containers
   img = $$('img[data-src]').first().attr('data-src') ||
         $$('img[data-original]').first().attr('data-original') ||
         $$('img[src*="/assets/images"]').first().attr('src') ||
@@ -64,15 +70,48 @@ function extractImage($$ , pageUrl){
   return img ? abs(img, pageUrl) : '';
 }
 
+// Robust price finder: prefer schema/meta, else prefer "sale/now/your price", else pick the smallest $
+function extractPrice($$){
+  // 1) Schema.org / meta
+  let content = $$('meta[itemprop="price"]').attr('content') ||
+                $$('[itemprop=price]').first().text();
+  if (content) {
+    const m = (content.match(/[\d\.,]+/)||[])[0];
+    if (m) return `$${m.replace(/,/g,'')}`;
+  }
+  // 2) Common price blocks
+  const blocks = $$('[class*=Price], .price, .ProductPrice, #price, .sale, .SalePrice, .OurPrice, .retail, .RetailPrice');
+  let candidates = [];
+  blocks.each((_, el)=>{
+    const txt = cleanText($$(el).text());
+    const money = Array.from(txt.matchAll(/\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})/g)).map(m=>m[0]);
+    if (money.length){
+      const label = txt.toLowerCase();
+      // mark money with a bias score (sale/now preferred)
+      money.forEach(val => {
+        let score = 0;
+        if (/sale|now|your price|our price|special/i.test(label)) score += 2;
+        if (/retail|msrp|compare/i.test(label)) score -= 1;
+        candidates.push({ val, score });
+      });
+    }
+  });
+  if (candidates.length){
+    // sort by score desc, then numeric asc (sale price usually lower)
+    candidates.sort((a,b)=> (b.score - a.score) || (parseFloat(a.val.replace(/[$,]/g,'')) - parseFloat(b.val.replace(/[$,]/g,''))));
+    const best = candidates[0].val;
+    return best.startsWith('$') ? best : `$${best}`;
+  }
+  return '';
+}
+
 function detectStock($$){
   let avail = $$('meta[itemprop="availability"]').attr('content') || $$('link[itemprop="availability"]').attr('href') || '';
   avail = (avail||'').toLowerCase();
   if (/outofstock/.test(avail)) return false;
   if (/instock|preorder/.test(avail)) return true;
-
   const bodyText = $$('body').text().toLowerCase();
   if (/(out\s*of\s*stock|sold\s*out|unavailable|back[-\s]?order\s*only)/i.test(bodyText)) return false;
-
   let hasAdd = false;
   $$('button, input[type=submit], a').each((i,el)=>{
     const t = ($$(el).text() || $$(el).attr('value') || '').toLowerCase();
@@ -111,11 +150,14 @@ async function loadPages() {
   for (const entry of (PAGES.pages || [])) {
     const url = entry.url; const selector = entry.selector || 'body';
     try {
-      const r = await fetch(url, { redirect: 'follow' }); if (!r.ok) continue;
-      const h = await r.text(); const $ = cheerio.load(h);
+      const h = await get(url);
+      const $ = cheerio.load(h);
       const title = cleanText($('title').first().text()) || url;
       const text = cleanText($(selector).text());
-      const image = extractImage($, url);
+      const image = (function(){
+        let img = $('meta[property="og:image"]').attr('content') || $('img[src*="/assets/images"]').first().attr('src') || $('img[src]').first().attr('src');
+        return img ? abs(img, url) : '';
+      })();
       if (text && text.length > 200) DOCS.push({ url, title, text, image });
     } catch {}
   }
@@ -143,30 +185,27 @@ function searchDocs(q){
 
 // ---------- Product harvesting ----------
 function looksProductHref(href=''){
-  return /_p_\d+|\/p-\d+|ProductDetails\.asp|product\.asp/i.test(href);
+  return /_p_\d+(\.html)?|\/p-\d+|ProductDetails\.asp|product\.asp|\/product\/\d+/i.test(href);
 }
-
 async function harvestProductsFromCategory(categoryUrl){
   const out = [];
   try {
-    const r = await fetch(categoryUrl, { redirect: 'follow' }); if (!r.ok) return out;
-    const h = await r.text(); const $ = cheerio.load(h);
-
+    const h = await get(categoryUrl);
+    const $ = cheerio.load(h);
     const links = new Set();
     $('a').each((_, a) => {
       const href = $(a).attr('href') || '';
       if (looksProductHref(href)) links.add(abs(href, categoryUrl));
     });
-
-    for (const link of Array.from(links).slice(0, 20)) {
+    for (const link of Array.from(links).slice(0, 24)) {
       try {
-        const pr = await fetch(link, { redirect: 'follow' }); if (!pr.ok) continue;
-        const ph = await pr.text(); const $$ = cheerio.load(ph);
+        const ph = await get(link);
+        const $$ = cheerio.load(ph);
         const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
-        const priceRaw = $$('[class*=Price], .price, .ProductPrice, #price').first().text().replace(/\s+/g,' ').trim();
+        const price = extractPrice($$);
         const image = extractImage($$, link);
         const instock = detectStock($$);
-        out.push({ title, url: link, price: normalizePrice(priceRaw), image, instock });
+        out.push({ title, url: link, price, image, instock });
       } catch {}
     }
   } catch {}
@@ -180,51 +219,43 @@ function expandQuery(q){
   const g = parseGauge(q); if (g) add.push(`${g}g`);
   return `${q} ${add.join(' ')}`.trim();
 }
-
 async function searchProductsOnDemand(q){
   const q2 = expandQuery(q);
   const url = `${SITE}/search.asp?keyword=${encodeURIComponent(q2)}`;
-  const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) return { inStock:[], oos:[] };
-  const html = await res.text();
-  const $ = cheerio.load(html);
-
-  const links = new Set();
-  $('a').each((_, a) => {
-    const href = $(a).attr('href') || '';
-    const text = cleanText($(a).text() || '');
-    if (looksProductHref(href) && text.length > 2) {
-      links.add(abs(href, SITE));
+  let items = [];
+  try {
+    const html = await get(url);
+    const $ = cheerio.load(html);
+    const links = new Set();
+    $('a').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      const text = cleanText($(a).text() || '');
+      if (looksProductHref(href) && text.length >= 1) links.add(abs(href, SITE));
+    });
+    for (const link of Array.from(links).slice(0, 18)) {
+      try {
+        const ph = await get(link);
+        const $$ = cheerio.load(ph);
+        const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
+        const price = extractPrice($$);
+        const image = extractImage($$, link);
+        const instock = detectStock($$);
+        items.push({ title, url: link, price, image, instock });
+      } catch {}
     }
-  });
+  } catch {}
+  return items;
+}
 
-  const items = [];
-  for (const link of Array.from(links).slice(0, 14)) {
-    try {
-      const r = await fetch(link, { redirect: 'follow' }); if (!r.ok) continue;
-      const h = await r.text(); const $$ = cheerio.load(h);
-      const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
-      const priceRaw = $$('[class*=Price], .price, .ProductPrice, #price').first().text().replace(/\s+/g,' ').trim();
-      const image = extractImage($$, link);
-      const instock = detectStock($$);
-      items.push({ title, url: link, price: normalizePrice(priceRaw), image, instock });
-    } catch {}
-  }
-
-  function score(p){
-    let s = 0;
-    const t = p.title.toLowerCase(), ql = q.toLowerCase();
-    for (const w of ql.split(/\s+/)) if (w && t.includes(w)) s += 1;
-    for (const k in SYN) if (SYN[k].some(tk => ql.includes(tk) && t.includes(tk))) s += 2;
-    const g = parseGauge(q); if (g && t.includes(`${g}g`)) s += 3;
-    if (/kit\b/i.test(ql) && /kit\b/i.test(t)) s += 4;
-    if (/steril/i.test(ql) && /steril/i.test(t)) s += 4;
-    return s;
-  }
-  const ranked = items.map(p => ({...p, score: score(p)})).sort((a,b)=>b.score-a.score);
-  const inStock = ranked.filter(p => p.instock !== false).slice(0, 6);
-  const oos = ranked.filter(p => p.instock === false).slice(0, 6);
-  return { inStock, oos };
+function scoreAgainstQuery(q, p){
+  let s = 0;
+  const t = p.title.toLowerCase(), ql = q.toLowerCase();
+  for (const w of ql.split(/\s+/)) if (w && t.includes(w)) s += 1;
+  for (const k in SYN) if (SYN[k].some(tk => ql.includes(tk) && t.includes(tk))) s += 2;
+  const g = parseGauge(q); if (g && t.includes(`${g}g`)) s += 3;
+  if (/kit\b/i.test(ql) && /kit\b/i.test(t)) s += 4;
+  if (/steril/i.test(ql) && /steril/i.test(t)) s += 6; // boost sterile
+  return s;
 }
 
 // ---------- Route ----------
@@ -247,38 +278,26 @@ app.post('/hbj/chat', async (req, res) => {
     for (const key of Object.keys(RULES.faqs||{})) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
 
     // Products via on-demand search
-    let { inStock, oos } = await searchProductsOnDemand(q);
+    let items = await searchProductsOnDemand(q);
 
-    // If search is empty and query suggests categories, harvest category pages
-    const needSterile = /steril/i.test(q);
-    const needProKits = /(ear\s*(piercing)?\s*kit|professional kit)/i.test(q);
-    const needKits = /\bkit(s)?\b/i.test(q);
-
-    let harvested = [];
-    if ((!inStock.length && !oos.length) || needSterile || needProKits || needKits) {
-      const harvestTargets = new Set();
-      if (needSterile) harvestTargets.add(`${SITE}/Sterilized-Body-Jewelry_c_42.html`);
-      if (needProKits) harvestTargets.add(`${SITE}/Professional-Piercing-Kits_c_7.html`);
-      if (needKits) harvestTargets.add(`${SITE}/Safe-and-Sterile-Piercing-Kits_c_1.html`);
-
-      for (const u of Array.from(harvestTargets)) {
-        const got = await harvestProductsFromCategory(u);
-        harvested = harvested.concat(got);
-      }
-      // Merge with on-demand results, unique by URL
-      const seen = new Set([...(inStock.map(x=>x.url)), ...(oos.map(x=>x.url))]);
-      for (const it of harvested) {
-        if (!seen.has(it.url)) {
-          if (it.instock === false) oos.push(it); else inStock.push(it);
-          seen.add(it.url);
-        }
-      }
-      // Re-trim
-      inStock = inStock.slice(0, 6);
-      oos = oos.slice(0, 6);
+    // Sterile preference: harvest sterilized category if query mentions steril*
+    const mentionSterile = /steril/i.test(q);
+    if (mentionSterile) {
+      const sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
+      const urls = new Set(items.map(i=>i.url));
+      for (const it of sterileHarvest) if (!urls.has(it.url)) items.push(it);
     }
 
-    const cards = inStock.slice(0,4).map(p => `
+    // Score and split
+    const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
+    const sterileFirst = mentionSterile
+      ? ranked.sort((a,b)=> (b.title.toLowerCase().includes('steril') - a.title.toLowerCase().includes('steril')) || (b.score - a.score))
+      : ranked;
+
+    const inStock = sterileFirst.filter(p => p.instock !== false).slice(0, 6);
+    const oos = sterileFirst.filter(p => p.instock === false).slice(0, 6);
+
+    const cards = inStock.slice(0,6).map(p => `
       <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
         <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
           ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
@@ -321,7 +340,6 @@ app.post('/hbj/chat', async (req, res) => {
 
     const html = `
       <div style="font-size:14px">
-        ${safety}
         ${sourceBlock}
         <div style="margin:6px 0">${kb || defaultBlurb}</div>
         ${oosBlock}
@@ -335,6 +353,20 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
+// Probes for quick verification
+app.get('/hbj/probe', async (req, res) => {
+  try {
+    const type = (req.query.type || 'sterile').toString();
+    let url = STERILIZED_CAT;
+    if (type === 'prokits') url = PRO_KITS_CAT;
+    if (type === 'safekits') url = SAFE_KITS_CAT;
+    const items = await harvestProductsFromCategory(url);
+    res.json({ ok: true, type, count: items.length, sample: items.slice(0,8) });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 app.get('/hbj/health', (_,res)=>{
   res.json({ ok:true, docs: DOCS.length });
 });
@@ -342,7 +374,7 @@ app.get('/hbj/health', (_,res)=>{
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot Hotfix v1.7.0 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot Hotfix v1.7.2 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
