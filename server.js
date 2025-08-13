@@ -1,6 +1,6 @@
-// server.js (patched)
-// HBJ Assistant — smarter search, KB overrides, images, safety copy, page-context
-// ESM module
+// server.js (pages-aware)
+// Adds ingestion of specific pages defined in pages.json and answers from them.
+// Builds on previous "patched" version (smart search, KB, images, safety).
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -32,6 +32,7 @@ app.use(cors({
 // ---------- Globals ----------
 const SITE = 'https://www.hottiebodyjewelry.com';
 let CATALOG = []; // {title, url, price, category, image}
+let DOCS = [];    // {url, title, text}
 
 // ---------- Rules / KB ----------
 let RULES = { faqs:{}, promote_first:[] };
@@ -41,6 +42,16 @@ try {
   console.log('Loaded rules.json');
 } catch (e) {
   console.log('rules.json not found; proceeding with defaults');
+}
+
+// ---------- Pages config ----------
+let PAGES = { pages: [] };
+try {
+  const raw = fs.readFileSync('./pages.json','utf8');
+  PAGES = JSON.parse(raw);
+  console.log('Loaded pages.json with', PAGES.pages?.length || 0, 'pages');
+} catch (e) {
+  console.log('pages.json not found; proceeding without explicit pages');
 }
 
 // ---------- Helpers ----------
@@ -74,8 +85,60 @@ function kbAnswer(q){
 function normalizePrice(txt=''){
   const t = txt.replace(/[^0-9\.\,]/g,'');
   if (!t) return '';
-  // simple US format
   return t.startsWith('$') ? t : `$${t}`;
+}
+
+function cleanText(t=''){
+  return t.replace(/\s+/g,' ').replace(/\u00a0/g,' ').trim();
+}
+
+// ---------- Load specific pages ----------
+async function loadPages() {
+  DOCS = [];
+  for (const entry of (PAGES.pages || [])) {
+    const url = entry.url;
+    const selector = entry.selector || 'body';
+    try {
+      const r = await fetch(url, { redirect: 'follow' });
+      if (!r.ok) continue;
+      const h = await r.text();
+      const $ = cheerio.load(h);
+      const title = cleanText($('title').first().text()) || url;
+      const text = cleanText($(selector).text());
+      if (text && text.length > 200) {
+        DOCS.push({ url, title, text });
+        console.log('Ingested page:', url, 'len=', text.length);
+      }
+    } catch (e) {
+      console.log('Page load failed:', url, e.message);
+    }
+  }
+}
+
+// Simple relevance ranking for docs
+function scoreDoc(q, d){
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  let s = 0;
+  const hay = d.text.toLowerCase();
+  for (const t of terms) if (hay.includes(t)) s += 2;
+  if (/ship|delivery|return|refund/i.test(q)) if (/ship|return|refund/i.test(hay)) s += 5;
+  if (/aftercare|clean|saline|healing/i.test(q)) if (/aftercare|clean|saline|healing/i.test(hay)) s += 5;
+  if (/steril/i.test(q)) if (/steril/i.test(hay)) s += 5;
+  return s;
+}
+
+function searchDocs(q){
+  if (!DOCS.length) return null;
+  const ranked = DOCS
+    .map(d => ({...d, score: scoreDoc(q, d)}))
+    .sort((a,b)=> b.score - a.score);
+  const top = ranked[0];
+  if (!top || top.score <= 0) return null;
+  const idx = Math.max(0, top.text.toLowerCase().indexOf(q.split(/\s+/)[0].toLowerCase()));
+  const start = Math.max(0, idx - 200);
+  const end = Math.min(top.text.length, start + 400);
+  const snippet = top.text.slice(start, end);
+  return { title: top.title, url: top.url, snippet };
 }
 
 // ---------- Catalog loader ----------
@@ -94,7 +157,6 @@ async function loadProductIndex() {
       }
     });
 
-    // Enrich first 300 with price/category/image
     const slice = items.slice(0, 300);
     for (const it of slice) {
       try {
@@ -119,35 +181,25 @@ async function loadProductIndex() {
   }
 }
 
-// ---------- Search ----------
+// ---------- Product search ----------
+const SYN_MAP = SYN;
+
 function scoreProduct(q, p){
   const ql = q.toLowerCase();
   const title = `${p.title} ${p.category||''}`.toLowerCase();
   let s = 0;
 
-  // direct word hits
   for (const w of ql.split(/\s+/)) if (w && title.includes(w)) s += 1;
-
-  // synonyms
-  for (const k in SYN) {
-    if (SYN[k].some(t => ql.includes(t))) {
-      if (SYN[k].some(t => title.includes(t))) s += 3; else s += 1;
+  for (const k in SYN_MAP) {
+    if (SYN_MAP[k].some(t => ql.includes(t))) {
+      if (SYN_MAP[k].some(t => title.includes(t))) s += 3; else s += 1;
     }
   }
-
-  // gauge
   const g = parseGauge(q);
   if (g && title.includes(`${g}g`)) s += 4;
-
-  // kit bias
   if (/\bkit\b/.test(ql) && /kit\b/.test(title)) s += 5;
-
-  // sterile bias
   if (/steril/i.test(ql) && /steril/i.test(title)) s += 5;
-
-  // promote specific products
   if ((RULES.promote_first||[]).some(n => title.includes(n.toLowerCase()))) s += 3;
-
   return s;
 }
 
@@ -159,27 +211,12 @@ function searchProducts(q){
     .slice(0, 6);
 }
 
-// ---------- Fallback categories ----------
-function buildFallback(q){
-  const hints = [
-    { key:/septum|bull/i, label:'Septum Kits', url:`${SITE}/search.asp?keyword=septum%20kit` },
-    { key:/tragus/i,      label:'Tragus Kits', url:`${SITE}/search.asp?keyword=tragus%20kit` },
-    { key:/steril/i,      label:'Sterilized Jewelry', url:`${SITE}/search.asp?keyword=sterilized` },
-    { key:/nose|nostril/i,label:'Nose Kits', url:`${SITE}/search.asp?keyword=nose%20kit` }
-  ].filter(h => h.key.test(q));
-  if (!hints.length) return '';
-  return `<div style="margin-top:8px">Try these categories:</div>${
-    hints.map(h=>`<div><a href="${h.url}" target="_blank">${h.label}</a></div>`).join('')
-  }`;
-}
-
 // ---------- Routes ----------
 app.post('/hbj/chat', async (req, res) => {
   try {
     let q = (req.body.q || '').toString().trim();
     const page = (req.body.page || '').toString();
 
-    // Page context → bias terms
     if (/septum/i.test(page)) q += ' septum';
     if (/tragus/i.test(page)) q += ' tragus';
     if (/nose/i.test(page)) q += ' nose';
@@ -187,10 +224,14 @@ app.post('/hbj/chat', async (req, res) => {
     const looksHowTo = /(how to|tutorial|step by step|pierce.*myself)/i.test(q);
     const safety = looksHowTo ? `<div style="margin:8px 0; font-size:12px; opacity:.8">Educational info only. We don’t endorse self-piercing. Consider a licensed professional.</div>` : '';
 
-    const kb = kbAnswer(q);
-    const candidates = searchProducts(q);
+    // Page-based answer
+    const docHit = searchDocs(q);
 
-    // HTML cards
+    // KB override
+    const kb = kbAnswer(q);
+
+    // Products
+    const candidates = searchProducts(q);
     const cards = candidates.slice(0,4).map(p => `
       <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
         <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
@@ -205,24 +246,29 @@ app.post('/hbj/chat', async (req, res) => {
     `).join('');
 
     const faqHit = /shipping|return|when.*ship|how long|aftercare|steril|international|deliver|refund/i.test(q);
-    const blurb = kb ? kb : (faqHit
+    const defaultBlurb = faqHit
       ? `• <b>Shipping</b>: Most orders ship within 1 business day. Free shipping $100+ (USA only).<br>• <b>Sterile kits</b>: Include pre-sterilized jewelry plus links to videos & aftercare.`
-      : `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`);
+      : `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
 
-    const fallback = candidates.length ? '' : buildFallback(q);
+    const sourceBlock = docHit ? `
+      <div style="margin:6px 0; padding:8px; background:#fafafa; border:1px solid #eee; border-radius:8px">
+        <div style="font-weight:600; margin-bottom:6px">From: <a href="${docHit.url}" target="_blank">${docHit.title}</a></div>
+        <div style="font-size:13px">${docHit.snippet}...</div>
+      </div>
+    ` : '';
+
+    const blurb = kb || defaultBlurb;
 
     const html = `
       <div style="font-size:14px">
         ${safety}
+        ${sourceBlock}
         <div style="margin:6px 0">${blurb}</div>
         ${cards || `<div>No close matches yet. Try “16g septum kit” or “sterile barbell”.</div>`}
-        ${fallback}
       </div>
     `;
 
-    // Log queries for improvement
-    console.log(new Date().toISOString(), 'Q:', q, 'Page:', page, 'Results:', candidates.length);
-
+    console.log(new Date().toISOString(), 'Q:', q, 'Page:', page, 'Docs:', !!docHit, 'Results:', candidates.length);
     res.json({ html });
   } catch (e) {
     console.error('Chat error:', e);
@@ -230,11 +276,11 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_, res) => res.json({ ok: true, products: CATALOG.length }));
+app.get('/hbj/health', (_, res) => res.json({ ok: true, products: CATALOG.length, docs: DOCS.length }));
 
 // ---------- Boot ----------
 async function boot() {
-  await loadProductIndex();
+  await Promise.all([ loadProductIndex(), loadPages() ]);
 }
 boot();
 

@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.1.0",
-  "description": "Hottie Body Jewelry chatbot backend (patched)",
+  "version": "1.2.0",
+  "description": "Hottie Body Jewelry chatbot backend (pages-aware)",
   "type": "module",
   "main": "server.js",
   "scripts": {

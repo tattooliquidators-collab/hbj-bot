@@ -1,0 +1,20 @@
+{
+  "pages": [
+    {
+      "url": "https://www.hottiebodyjewelry.com/Shipping-and-Returns_ep_43-1.html",
+      "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/FAQs_ep_44-1.html",
+      "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/Safe-and-Sterile-Piercing-Kits_c_1.html",
+      "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/Aftercare.html",
+      "selector": "body"
+    }
+  ]
+}
