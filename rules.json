@@ -5,10 +5,15 @@
     "aftercare": "Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.",
     "are kits sterile": "Yes\u2014our kits include pre-sterilized jewelry and sealed components. Educational use only; we do not endorse self-piercing."
   },
+  "aliases": {
+    "shipping": "returns policy delivery",
+    "course": "training apprentice class"
+  },
   "promote_first": [
     "Tragus Piercing Kit",
     "Septum Piercing Kit",
     "Nose Piercing Kit",
     "Sterilized Body Jewelry"
-  ]
+  ],
+  "course_url": "https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING"
 }
