@@ -1,12 +1,8 @@
-# HBJ Bot — Pages-Aware
-Point the bot at specific site pages via `pages.json`. The bot ingests those pages at startup, searches them for answers, and shows a snippet + link in replies.
-
-## Files
-- `server.js` — loads `pages.json`, scrapes each page (selector optional), builds a small doc index, and searches it per question.
-- `pages.json` — list of pages to ingest. Add/remove URLs and redeploy.
-- `rules.json` — short, guaranteed answers for common FAQs + a promote list.
-- `package.json` — minimal deps.
+# HBJ Bot — Pages + Stock Filter + Direct OOS
+- Ingests specific site pages from `pages.json` (now includes Professional Piercing Kits)
+- Recommends **only** in-stock items by default
+- Shows **out-of-stock** items *only* when the user explicitly asks about them (mentions "out of stock/available/restock" etc.) or clearly names the exact product
 
 ## Deploy
-Replace your repo’s files with these, commit, and Render will redeploy.
-Verify at `/hbj/health` — you should see nonzero `docs` and `products`.
+Replace `server.js`, `package.json`, `pages.json`, `rules.json` in your GitHub repo.
+Render auto-redeploys. Check `/hbj/health` for stock counts.

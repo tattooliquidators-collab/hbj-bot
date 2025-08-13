@@ -15,6 +15,14 @@
     {
       "url": "https://www.hottiebodyjewelry.com/Aftercare.html",
       "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/Sterilized-Body-Jewelry_c_42.html",
+      "selector": "body"
+    },
+    {
+      "url": "https://www.hottiebodyjewelry.com/Professional-Piercing-Kits_c_7.html",
+      "selector": "body"
     }
   ]
 }
