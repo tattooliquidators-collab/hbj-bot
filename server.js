@@ -1,7 +1,6 @@
-// server.js — HBJ Bot v1.8.5
-// Kit intent: NO options after the question. Footer ends with the plain question only.
-// Adds /hbj/probe?type=kit to preview the exact HTML for 'piercing kit'.
-// Health shows version 1.8.5.
+// server.js — HBJ Bot v1.8.7
+// Same behavior as v1.8.5 (kit footer question only; no option chips).
+// Health/version bumped to 1.8.7. Course URL is read from rules.json.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -392,8 +391,7 @@ async function respondForQuery(q){
     footer = `
       <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
         <div style="font-weight:700;">What kind of piercing kit are you looking for?</div>
-      </div>
-      <!-- HBJ v1.8.5: kit footer question only (no option chips) -->`;
+      </div>`;
   } else if (it === 'sterile') {
     const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
     if (sterileInstock.length){
@@ -516,7 +514,6 @@ async function respondForQuery(q){
   const html = `
     <div style="font-size:14px">
       ${topPanel}
-      ${/* No oosBlock/generalCards after footer; footer is last */''}
       ${footer}
     </div>`;
   return html;
@@ -562,13 +559,13 @@ app.get('/hbj/probe', async (req, res) => {
 });
 
 app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length, version: '1.8.5' });
+  res.json({ ok:true, docs: DOCS.length, version: '1.8.7' });
 });
 
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot v1.8.5 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot v1.8.7 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
