@@ -1,9 +1,15 @@
 
-// server.js — HBJ Bot v1.9.9
-// Fix: guard kit search to prevent 500s and always render HTML
-//  • searchProducts() now wrapped in try/catch; on failure falls back to PRO_KITS_CAT scrape
-//  • composeKitQuestion/composeKitType never throw; friendly empty-states
-//  • Retains form-based CTAs (can't be rewritten), one-word kit intents, OOS filtering
+// server.js — HBJ Bot v2.0.0
+// Features:
+//  • ZERO-404: all CTAs/cards are <form method=GET target=_blank> to direct store URLs (no rewritten anchors)
+//  • One-word kit intents (nose, ear, nipple, clit, genital, etc.) + out-of-stock suppression + resilient fallbacks
+//  • Built-in Contact flow: "contact/email/call" shows a form that posts to /hbj/contact; optional SMTP forward
+//  • High-contrast buttons with inline !important styles; mobile-friendly grids
+//
+// Env (optional for email forwarding):
+//  CONTACT_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
+//
+// Health: GET /hbj/health → { version: "2.0.0" }
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -16,6 +22,7 @@ import fs from 'fs';
 dotenv.config();
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(compression());
 
 // ---------- CORS ----------
@@ -39,12 +46,14 @@ const SHIPPING_URL   = `${SITE}/Shipping-and-Returns_ep_43-1.html`;
 const ABOUT_URL      = `${SITE}/About-Us_ep_7.html`;
 const CONTACT_URL    = `${SITE}/crm.asp?action=contactus`;
 
+const API_BASE = (process.env.PUBLIC_BASE || process.env.RENDER_EXTERNAL_URL || 'https://hbj-bot.onrender.com').replace(/\/+$/,'');
+
 // ---------- Rules ----------
 let RULES = { course_url: '' };
 try { RULES = JSON.parse(fs.readFileSync('./rules.json','utf8')); } catch {}
 
 // Canonical course URL guard
-const CANON_COURSE = '__CANON__';
+const CANON_COURSE = 'https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING-SOON_p_363.html';
 function normalizeCourseUrl(raw) {
   const v = (raw||'').trim();
   if (!v) return CANON_COURSE;
@@ -249,6 +258,7 @@ function intentOf(q){
   if (/(aftercare|after care|care instructions|clean|saline|healing)/i.test(s)) return 'aftercare';
   if (/steril/i.test(s)) return 'sterile';
   if (/(course|training|apprentice|class|master class|certification)/i.test(s)) return 'course';
+  if (/(contact|email|e-mail|phone|call|text|reach|message|support|help\s*desk)/i.test(s)) return 'contact';
   if (/\bkit(s)?\b/i.test(s)) return 'kit';
   const words = s.split(/\s+/).filter(Boolean);
   const oneWord = words.length <= 2 && words.every(w => w.length <= 12);
@@ -295,6 +305,43 @@ function cardHTML(p){
         </div>
       </button>
     </form>`;
+}
+
+// ---------- Contact composer ----------
+function composeContact(){
+  const action = `${API_BASE}/hbj/contact`;
+  const fallback = `${SITE}/crm.asp?action=contactus`;
+  const html = `
+    <div style="margin:6px 0 10px 0; font-weight:800">Send us a message</div>
+    <form action="${action}" method="POST" target="_blank"
+          style="display:block;border:1px solid #eee;border-radius:12px;padding:12px;background:#fafafa">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <input name="name" placeholder="Your name" required
+               style="padding:10px;border:1px solid #ddd;border-radius:8px">
+        <input name="email" type="email" placeholder="Your email" required
+               style="padding:10px;border:1px solid #ddd;border-radius:8px">
+      </div>
+      <div style="margin-top:8px">
+        <input name="phone" placeholder="Phone (optional)"
+               style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px">
+      </div>
+      <div style="margin-top:8px">
+        <textarea name="message" placeholder="How can we help?" rows="4" required
+                  style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px"></textarea>
+      </div>
+      <input type="hidden" name="site" value="${SITE}">
+      <div style="margin-top:10px">
+        <button type="submit"
+          style="background:#0b5fff!important;color:#fff!important;padding:10px 14px;border-radius:10px;
+                 font-weight:900!important;border:0;cursor:pointer">
+          Send message
+        </button>
+      </div>
+    </form>
+    <div style="margin-top:8px;font-size:12px;color:#333">
+      Prefer a page? ${formBtn(fallback, 'Open Contact Page')}
+    </div>`;
+  return shell(html);
 }
 
 // ---------- Composers ----------
@@ -366,7 +413,7 @@ async function composeKitType(word){
       </div>` : `<div>No in-stock ${word} kits found right now. Try another type.</div>`;
     return shell(grid);
   } catch (e) {
-    return shell(`<div>Couldn’t load ${word} kits right now. Try again in a bit or open ${formBtn(PRO_KITS_CAT, 'Professional Kits')}</div>`);
+    return shell(`<div>Couldn’t load ${word} kits right now. Try again later or open ${formBtn(PRO_KITS_CAT, 'Professional Kits')}</div>`);
   }
 }
 
@@ -435,6 +482,56 @@ async function composeCourse(){
   return shell(`${top}${foot}`);
 }
 
+// ---------- Contact endpoint ----------
+function sanitize(s=''){ return String(s).replace(/[<>]/g,'').trim(); }
+
+app.post('/hbj/contact', async (req, res) => {
+  try {
+    const name = sanitize(req.body.name);
+    const email = sanitize(req.body.email);
+    const phone = sanitize(req.body.phone);
+    const message = sanitize(req.body.message);
+    if (!name || !email || !message || !/@/.test(email)){
+      return res.status(400).send('Missing required fields.');
+    }
+
+    // Log for audit
+    console.log(JSON.stringify({ event:'hbj.contact', name, email, phone, message, ts: new Date().toISOString() }));
+
+    // OPTIONAL: Email forward if SMTP is configured
+    try {
+      if (process.env.SMTP_HOST && process.env.CONTACT_TO) {
+        const nodemailer = (await import('nodemailer')).default;
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: Number(process.env.SMTP_PORT || 587),
+          secure: false,
+          auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined
+        });
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || 'hbj-bot@hottiebodyjewelry.com',
+          to: process.env.CONTACT_TO,
+          subject: `HBJ Contact: ${name}`,
+          text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone}\n\n${message}`
+        });
+      }
+    } catch (_) { /* non-fatal */ }
+
+    // Simple thank-you page
+    res.set('Content-Type','text/html');
+    res.send(`
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <div style="font-family:system-ui,Arial;padding:20px;max-width:560px;margin:20px auto;border:1px solid #eee;border-radius:12px">
+        <h2>Thanks, ${name}!</h2>
+        <p>We received your message and will get back to <b>${email}</b>.</p>
+        <p style="margin-top:10px"><a href="${CONTACT_URL}">Open the Contact page</a> if you prefer.</p>
+      </div>
+    `);
+  } catch (e) {
+    res.status(200).send('Thanks—your message was received.');
+  }
+});
+
 // ---------- API ----------
 function normQuery(q){ return cleanText((q||'').toLowerCase()); }
 
@@ -450,6 +547,7 @@ app.post('/hbj/chat', async (req, res) => {
     else if (intent === 'aftercare') html = await composeAftercare();
     else if (intent === 'sterile') html = await composeSterile();
     else if (intent === 'course') html = await composeCourse();
+    else if (intent === 'contact') html = composeContact();
     else if (intent === 'kit') html = await composeKitQuestion();
     else if (intent === 'kit_type') {
       const word = key.split(/\s+/).find(w => KIT_WORDS.has(w)) || 'piercing';
@@ -460,12 +558,11 @@ app.post('/hbj/chat', async (req, res) => {
     cacheSet(CACHE.chat, key, html);
     res.json({ html });
   } catch (e) {
-    // Never leak a 500 into the chat; provide a safe fallback
     res.json({ html: shell(`<div>Couldn’t load results right now. Try again or open ${formBtn(PRO_KITS_CAT, 'Professional Kits')}</div>`) });
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.9' }));
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '2.0.0', api_base: API_BASE }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
