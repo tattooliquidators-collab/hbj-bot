@@ -1,6 +1,11 @@
-// server.js — HBJ Bot v1.8.7
-// Same behavior as v1.8.5 (kit footer question only; no option chips).
-// Health/version bumped to 1.8.7. Course URL is read from rules.json.
+// server.js — HBJ Bot v1.8.9
+// Behavior:
+//  - "Find a kit": shows Home Specials kits grid, then ONLY the question line (no options).
+//  - "Sterilized jewelry": shows products grid + compact picks footer.
+//  - "Aftercare", "Shipping": info panel + CTA footer.
+//  - "Course": opens course page even if OOS (URL from rules.json).
+//  - Answer-last: the last element is the actionable footer/question.
+// Probes: /hbj/health, /hbj/probe?type=course|shipping|homespecials|kit|prokits|safekits
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -39,7 +44,6 @@ const AFTERCARE_URL = `${SITE}/Aftercare_ep_42-1.html`;
 const SHIPPING_URL = `${SITE}/Shipping-and-Returns_ep_43-1.html`;
 const ABOUT_URL = `${SITE}/About-Us_ep_7.html`;
 const CONTACT_URL = `${SITE}/crm.asp?action=contactus`;
-const VIDEOS_URL = `${SITE}/Body-Piercing-Videos_ep_40.html`;
 
 let DOCS = []; // {url, title, text, image}
 
@@ -118,6 +122,7 @@ function extractPrice($$){
     }
   });
   if (candidates.length){
+    // prefer higher scored; tie-breaker prefers lower price (more likely the sale price)
     candidates.sort((a,b)=> (b.score - a.score) || (parseFloat(a.val.replace(/[$,]/g,'')) - parseFloat(b.val.replace(/[$,]/g,''))));
     const best = candidates[0].val;
     return best.startsWith('$') ? best : `$${best}`;
@@ -333,17 +338,9 @@ function intentOf(q){
 
 // ---------- Route ----------
 async function respondForQuery(q){
-  const page = '';
   let qq = (q||'').toString().trim();
-  if (/septum/i.test(page)) qq += ' septum';
-  if (/tragus/i.test(page)) qq += ' tragus';
-  if (/nose/i.test(page)) qq += ' nose';
 
   const it = intentOf(qq);
-  const norm = qq.toLowerCase();
-  const docHit = searchDocs(qq);
-  let kb = null;
-  for (const key of Object.keys((RULES.faqs||{}))) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
 
   let items = [];
   if (it === 'general' || it === 'sterile') {
@@ -363,11 +360,9 @@ async function respondForQuery(q){
   }
 
   const ranked = items.map(p => ({...p, score: scoreAgainstQuery(qq, p)})).sort((a,b)=>b.score-a.score);
-  const oos = ranked.filter(p => p.instock === false).slice(0, 4);
 
   let topPanel = '';
   let footer = '';
-  let generalCards = '';
 
   if (it === 'kit') {
     const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
@@ -559,13 +554,13 @@ app.get('/hbj/probe', async (req, res) => {
 });
 
 app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length, version: '1.8.7' });
+  res.json({ ok:true, docs: DOCS.length, version: '1.8.9' });
 });
 
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot v1.8.7 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot v1.8.9 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
