@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.4.0",
-  "description": "Hottie Body Jewelry chatbot backend (pages-aware + stock filter + direct OOS only)",
+  "version": "1.7.0",
+  "description": "HBJ chatbot backend — hotfix v1.7.0 (category harvesting + page previews + OOS policy)",
   "type": "module",
   "main": "server.js",
   "scripts": {
