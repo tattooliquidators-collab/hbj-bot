@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.8.2",
-  "description": "HBJ chatbot backend — v1.8.2 full bundle (shipping intent, aftercare, sterile gallery, course exception, answer-last)",
+  "version": "1.8.3",
+  "description": "HBJ chatbot backend — v1.8.3 (kit intent: home specials kits + question footer; answer-last)",
   "type": "module",
   "main": "server.js",
   "scripts": {

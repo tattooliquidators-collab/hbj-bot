@@ -1,6 +1,8 @@
-// server.js — HBJ Bot v1.8.2 (full bundle)
-// Intents: shipping, aftercare, sterile, course (exception), general
-// Rules: answer-last guarantee; OOS shown only on direct ask; exact CTAs; probes for sanity checks
+// server.js — HBJ Bot v1.8.3
+// New: 'kit' intent pulls Piercing Kits from the Home page "Home Specials"/featured area,
+// renders a grid (images + prices) and ends with the question:
+//   "What kind of piercing kit are you looking for?"
+// Preserves: answer-last guarantee; OOS shown only on direct ask; intents for sterile/aftercare/shipping/course.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -31,6 +33,7 @@ app.use(cors({
 
 // ---------- Globals ----------
 const SITE = 'https://www.hottiebodyjewelry.com';
+const HOME = SITE + '/';
 const STERILIZED_CAT = `${SITE}/Sterilized-Body-Jewelry_c_42.html`;
 const PRO_KITS_CAT = `${SITE}/Professional-Piercing-Kits_c_7.html`;
 const SAFE_KITS_CAT = `${SITE}/Safe-and-Sterile-Piercing-Kits_c_1.html`;
@@ -65,6 +68,7 @@ async function get(url){
   if (!r.ok) throw new Error(`GET ${url} ${r.status}`);
   return await r.text();
 }
+
 async function getPreview(url){
   try{
     const h = await get(url);
@@ -207,6 +211,7 @@ function searchDocs(q){
 function looksProductHref(href=''){
   return /_p_\d+(\.html)?|\/p-\d+|ProductDetails\.asp|product\.asp|\/product\/\d+/i.test(href);
 }
+
 async function harvestProductsFromCategory(categoryUrl){
   const out = [];
   try {
@@ -230,6 +235,48 @@ async function harvestProductsFromCategory(categoryUrl){
     }
   } catch {}
   return out;
+}
+
+// Pulls kits that appear on the home page "Home Specials"/featured area.
+// Approach: collect all product links on the home page, fetch titles, filter where title includes "kit".
+async function harvestHomeSpecialKits(){
+  const out = [];
+  try {
+    const h = await get(HOME);
+    const $ = cheerio.load(h);
+    const links = new Set();
+    $('a').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      const text = cleanText($(a).text() || '');
+      // bias: if text mentions kit or it's within a specials/feature area, include
+      if (looksProductHref(href) && (/kit/i.test(text) || $(a).closest('section, div').text().toLowerCase().includes('home specials') || $(a).closest('section, div').text().toLowerCase().includes('special'))) {
+        links.add(abs(href, HOME));
+      }
+    });
+    // Fallback: if few found, just grab all product-like links from home
+    if (links.size < 6) {
+      $('a').each((_, a) => {
+        const href = $(a).attr('href') || '';
+        if (looksProductHref(href)) links.add(abs(href, HOME));
+      });
+    }
+    for (const link of Array.from(links).slice(0, 24)) {
+      try {
+        const ph = await get(link);
+        const $$ = cheerio.load(ph);
+        const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
+        if (!/kit/i.test(title)) continue; // only kits
+        const price = extractPrice($$);
+        const image = extractImage($$, link);
+        const instock = detectStock($$);
+        out.push({ title, url: link, price, image, instock });
+      } catch {}
+    }
+  } catch {}
+  // Deduplicate by URL
+  const seen = new Set(); const uniq = [];
+  for (const p of out) { if (seen.has(p.url)) continue; seen.add(p.url); uniq.push(p); }
+  return uniq;
 }
 
 // ---------- On-demand product search ----------
@@ -286,6 +333,7 @@ function intentOf(q){
   if (/(aftercare|after care|care instructions|clean|saline|healing)/i.test(s)) return 'aftercare';
   if (/steril/i.test(s)) return 'sterile';
   if (/(course|training|apprentice|class|master class|certification)/i.test(s)) return 'course';
+  if (/\bkit(s)?\b/i.test(s)) return 'kit';
   return 'general';
 }
 
@@ -320,6 +368,12 @@ app.post('/hbj/chat', async (req, res) => {
       for (const itx of sterileHarvest) if (!urls.has(itx.url)) items.push(itx);
     }
 
+    // Home Specials kits
+    let homeKits = [];
+    if (it === 'kit') {
+      homeKits = await harvestHomeSpecialKits();
+    }
+
     const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
     const oos = ranked.filter(p => p.instock === false).slice(0, 4);
 
@@ -328,7 +382,37 @@ app.post('/hbj/chat', async (req, res) => {
     let footer = '';
     let generalCards = '';
 
-    if (it === 'sterile') {
+    if (it === 'kit') {
+      const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
+      if (kitsInStock.length){
+        topPanel = `
+          <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
+          <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
+            ${kitsInStock.map(p => `
+              <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+                <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
+                  ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+                  <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
+                  ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+                </div>
+              </a>
+            `).join('')}
+          </div>`;
+      } else {
+        topPanel = `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing (ear, nose, septum, tragus) and I’ll show options.</div>`;
+      }
+      // Footer question is intentionally LAST (answer-last)
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
+          <div style="font-weight:700; margin-bottom:6px">What kind of piercing kit are you looking for?</div>
+          <div style="display:flex; flex-wrap:wrap; gap:8px; font-size:13px;">
+            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Ear</span>
+            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Nose</span>
+            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Septum</span>
+            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Tragus</span>
+          </div>
+        </div>`;
+    } else if (it === 'sterile') {
       const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
       if (sterileInstock.length){
         topPanel = `
@@ -490,6 +574,10 @@ app.get('/hbj/probe', async (req, res) => {
     if (type === 'course') {
       return res.json({ ok:true, type, course_url: (JSON.parse(fs.readFileSync('./rules.json','utf8')).course_url || '') });
     }
+    if (type === 'homespecials') {
+      const kits = await harvestHomeSpecialKits();
+      return res.json({ ok:true, type, count: kits.length, sample: kits.slice(0,8) });
+    }
     let url = STERILIZED_CAT;
     if (type === 'prokits') url = PRO_KITS_CAT;
     if (type === 'safekits') url = SAFE_KITS_CAT;
@@ -501,13 +589,13 @@ app.get('/hbj/probe', async (req, res) => {
 });
 
 app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length, version: '1.8.2' });
+  res.json({ ok:true, docs: DOCS.length, version: '1.8.3' });
 });
 
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot v1.8.2 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot v1.8.3 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
