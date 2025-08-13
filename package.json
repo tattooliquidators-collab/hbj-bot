@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.9.4",
-  "description": "HBJ chatbot backend \u2014 v1.9.4 (absolute links, high-contrast CTAs, 1\u2011word kit intents)",
+  "version": "1.9.6",
+  "description": "HBJ chatbot backend \u2014 v1.9.6 (direct store links only; strong inline CTA styles; 1-word kit intents)",
   "type": "module",
   "main": "server.js",
   "scripts": {
