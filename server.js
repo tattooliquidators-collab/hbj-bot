@@ -1,9 +1,11 @@
 
-// server.js — HBJ Bot v1.9.0
-// Fix: Course URL is hard-guarded. If rules.json is missing or has a truncated value
-// (e.g., ends at ...COMING), we FORCE the canonical URL:
-// https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING-SOON_p_363.html
-// Also retains: kit flow question-only; sterilized/aftercare/shipping as before.
+// server.js — HBJ Bot v1.9.1
+// Hard fixes:
+//  - Canonical course URL guard (normalizes to https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING-SOON_p_363.html if malformed)
+//  - All outbound links get UTM + cache-bust
+//  - Click tracking via /hbj/out redirect (logs to server console)
+//  - Mobile grid capped at 2 cols via embedded <style>
+// Existing behavior preserved: kit asks question only; sterile/aftercare/shipping/course panels.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -37,8 +39,6 @@ const SHIPPING_URL = `${SITE}/Shipping-and-Returns_ep_43-1.html`;
 const ABOUT_URL = `${SITE}/About-Us_ep_7.html`;
 const CONTACT_URL = `${SITE}/crm.asp?action=contactus`;
 
-let DOCS = []; // {url, title, text, image}
-
 // ---------- Rules / KB ----------
 let RULES = { faqs:{}, promote_first:[], aliases:{}, course_url:'' };
 try { RULES = JSON.parse(fs.readFileSync('./rules.json','utf8')); } catch {}
@@ -48,17 +48,11 @@ const CANON_COURSE = 'https://www.hottiebodyjewelry.com/Master-Body-Piercing-Cla
 function normalizeCourseUrl(raw) {
   const v = (raw||'').trim();
   if (!v) return CANON_COURSE;
-  // If it looks like the COMING slug but isn't the full page, force canonical
   if (/Master-Body-Piercing-Class-COMING($|[^-S])/.test(v)) return CANON_COURSE;
-  // If it doesn't end with .html, or isn't _p_363, also force canonical
   if (!/\.html($|\?)/i.test(v)) return CANON_COURSE;
   if (!/_p_363\.html($|\?)/.test(v)) return CANON_COURSE;
   return v;
 }
-
-// ---------- Pages config ----------
-let PAGES = { pages: [] };
-try { PAGES = JSON.parse(fs.readFileSync('./pages.json','utf8')); } catch {}
 
 // ---------- Helpers ----------
 function cleanText(t=''){ return t.replace(/\s+/g,' ').replace(/\u00a0/g,' ').trim(); }
@@ -87,9 +81,7 @@ async function getPreview(url){
               $('img[src]').first().attr('src') || '';
     if (img) img = abs(img, url);
     return { title, image: img };
-  }catch{
-    return { title: url, image: '' };
-  }
+  }catch{ return { title: url, image: '' }; }
 }
 
 function extractImage($$ , pageUrl){
@@ -162,19 +154,48 @@ const SYN = {
 };
 function parseGauge(q){ const m = q.match(/\b(10|12|14|16|18|20|22|8|6)\s*g\b/i); return m ? m[1] : null; }
 
-function tokenOverlap(a,b){
-  const A = new Set(a.toLowerCase().split(/\W+/).filter(x=>x.length>2));
-  const B = new Set(b.toLowerCase().split(/\W+/).filter(x=>x.length>2));
-  let hit = 0; for (const t of A) if (B.has(t)) hit++;
-  return hit;
+// ---------- UTM + Outbound redirect helpers ----------
+function utmize(rawUrl, campaign='general', extra={}) {
+  try {
+    const u = new URL(rawUrl);
+    u.searchParams.set('utm_source','hbjbot');
+    u.searchParams.set('utm_medium','chat');
+    u.searchParams.set('utm_campaign', campaign);
+    u.searchParams.set('hbjbot','1'); // cache-bust / CDN bypass hint
+    for (const [k,v] of Object.entries(extra||{})) if (v!=null) u.searchParams.set(k, String(v));
+    return u.toString();
+  } catch { return rawUrl; }
 }
-function looksDirectAsk(q, title){
-  const explicit = /(out of stock|sold out|back.?in stock|restock|available|availability|in stock)/i.test(q);
-  if (explicit) return true;
-  return tokenOverlap(q, title) >= 3;
+function outLink(rawUrl, campaign='general', extra={}) {
+  const target = encodeURIComponent(utmize(rawUrl, campaign, extra));
+  const ctx = encodeURIComponent(campaign);
+  return `/hbj/out?u=${target}&ctx=${ctx}`;
 }
 
-// ---------- Pages ingestion ----------
+// ---------- Click redirect ----------
+app.get('/hbj/out', (req, res) => {
+  try {
+    const url = decodeURIComponent(req.query.u || '');
+    const ctx = req.query.ctx || 'general';
+    const ua = req.headers['user-agent'] || '';
+    const ref = req.headers['referer'] || '';
+    const ip = req.headers['x-forwarded-for'] || req.ip;
+    console.log(JSON.stringify({
+      event:'hbj.click', ctx, url, ip, ua, ref, ts: new Date().toISOString()
+    }));
+    if (!/^https?:\/\//i.test(url)) return res.status(400).send('Bad URL');
+    return res.redirect(302, url);
+  } catch (e) {
+    return res.status(400).send('Bad URL');
+  }
+});
+
+// ---------- Pages config ----------
+let PAGES = { pages: [] };
+try { PAGES = JSON.parse(fs.readFileSync('./pages.json','utf8')); } catch {}
+
+// ---------- Docs ingest ----------
+let DOCS = [];
 async function loadPages() {
   DOCS = [];
   for (const entry of (PAGES.pages || [])) {
@@ -189,35 +210,12 @@ async function loadPages() {
         return img ? abs(img, url) : '';
       })();
       if (text && text.length > 200) DOCS.push({ url, title, text, image });
-    } catch {}
+    } catch { }
   }
 }
-function scoreDoc(q, d){
-  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
-  let s = 0, hay = d.text.toLowerCase();
-  for (const t of terms) if (hay.includes(t)) s += 2;
-  if (/ship|delivery|return|refund|exchange/i.test(q) && /ship|return|refund|exchange/i.test(hay)) s += 5;
-  if (/aftercare|after care|clean|saline|healing/i.test(q) && /aftercare|clean|saline|healing/i.test(hay)) s += 5;
-  if (/steril/i.test(q) && /steril/i.test(hay)) s += 5;
-  if (/kit/i.test(q) && /kit/i.test(hay)) s += 3;
-  if (/course|training|apprentice|class|certification/i.test(q) && /course|training|apprentice|class|certification/i.test(hay)) s += 4;
-  return s;
-}
-function searchDocs(q){
-  if (!DOCS.length) return null;
-  const ranked = DOCS.map(d => ({...d, score: scoreDoc(q,d)})).sort((a,b)=>b.score-a.score);
-  const top = ranked[0]; if (!top || top.score<=0) return null;
-  const need = q.split(/\s+/)[0].toLowerCase();
-  const idx = Math.max(0, top.text.toLowerCase().indexOf(need));
-  const start = Math.max(0, idx - 260), end = Math.min(top.text.length, start+800);
-  const snippet = top.text.slice(start, end);
-  return { title: top.title, url: top.url, snippet, image: top.image };
-}
 
-// ---------- Product harvesting ----------
-function looksProductHref(href=''){
-  return /_p_\d+(\.html)?|\/p-\d+|ProductDetails\.asp|product\.asp|\/product\/\d+/i.test(href);
-}
+// ---------- Product harvesting/search ----------
+function looksProductHref(href=''){ return /_p_\d+(\.html)?|\/p-\d+|ProductDetails\.asp|product\.asp|\/product\/\d+/i.test(href); }
 
 async function harvestProductsFromCategory(categoryUrl){
   const out = [];
@@ -238,13 +236,12 @@ async function harvestProductsFromCategory(categoryUrl){
         const image = extractImage($$, link);
         const instock = detectStock($$);
         out.push({ title, url: link, price, image, instock });
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
   return out;
 }
 
-// Pull kits from Home "Home Specials"/featured area
 async function harvestHomeSpecialKits(){
   const out = [];
   try {
@@ -269,20 +266,19 @@ async function harvestHomeSpecialKits(){
         const ph = await get(link);
         const $$ = cheerio.load(ph);
         const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
-        if (!/kit/i.test(title)) continue; // only kits
+        if (!/kit/i.test(title)) continue;
         const price = extractPrice($$);
         const image = extractImage($$, link);
         const instock = detectStock($$);
         out.push({ title, url: link, price, image, instock });
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
   const seen = new Set(); const uniq = [];
   for (const p of out) { if (seen.has(p.url)) continue; seen.add(p.url); uniq.push(p); }
   return uniq;
 }
 
-// ---------- On-demand product search ----------
 function expandQuery(q){
   let add = [];
   for (const k in SYN) if (SYN[k].some(t=>q.toLowerCase().includes(t))) add.push(k);
@@ -311,9 +307,9 @@ async function searchProductsOnDemand(q){
         const image = extractImage($$, link);
         const instock = detectStock($$);
         items.push({ title, url: link, price, image, instock });
-      } catch {}
+      } catch { }
     }
-  } catch {}
+  } catch { }
   return items;
 }
 
@@ -340,15 +336,11 @@ function intentOf(q){
   return 'general';
 }
 
-// ---------- Route ----------
+// ---------- Response compose ----------
 async function respondForQuery(q){
-  let qq = (q||'').toString().trim();
-  const it = intentOf(qq);
-
+  const it = intentOf((q||'').toString());
   let items = [];
-  if (it === 'general' || it === 'sterile') {
-    items = await searchProductsOnDemand(qq);
-  }
+  if (it === 'general' || it === 'sterile') items = await searchProductsOnDemand(q);
 
   let sterileHarvest = [];
   if (it === 'sterile') {
@@ -358,11 +350,20 @@ async function respondForQuery(q){
   }
 
   let homeKits = [];
-  if (it === 'kit') {
-    homeKits = await harvestHomeSpecialKits();
-  }
+  if (it === 'kit') homeKits = await harvestHomeSpecialKits();
 
-  const ranked = items.map(p => ({...p, score: scoreAgainstQuery(qq, p)})).sort((a,b)=>b.score-a.score);
+  const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
+
+  const style = `
+    <style>
+      .hbj-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
+      @media (max-width:520px) { .hbj-grid { grid-template-columns: repeat(2, 1fr) !important; } }
+      .hbj-card { border:1px solid #eee; border-radius:12px; padding:10px; }
+      .hbj-img { width:100%; height:120px; object-fit:cover; border-radius:8px }
+      .hbj-btn { display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700 }
+      .hbj-compact { display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2 }
+      .hbj-compact img { width:42px; height:42px; object-fit:cover; border-radius:6px }
+    </style>`;
 
   let topPanel = '';
   let footer = '';
@@ -372,11 +373,11 @@ async function respondForQuery(q){
     if (kitsInStock.length){
       topPanel = `
         <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
-        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
+        <div class="hbj-grid">
           ${kitsInStock.map(p => `
-            <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-              <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
-                ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+            <a href="${outLink(p.url,'kit_card')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
+              <div class="hbj-card">
+                ${p.image ? `<img src="${p.image}" alt="" class="hbj-img">` : ''}
                 <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
                 ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
               </div>
@@ -395,11 +396,11 @@ async function respondForQuery(q){
     if (sterileInstock.length){
       topPanel = `
         <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
-        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
+        <div class="hbj-grid">
           ${sterileInstock.map(p => `
-            <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-              <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
-                ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+            <a href="${outLink(p.url,'sterile_card')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
+              <div class="hbj-card">
+                ${p.image ? `<img src="${p.image}" alt="" class="hbj-img">` : ''}
                 <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
                 ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
               </div>
@@ -407,9 +408,9 @@ async function respondForQuery(q){
           `).join('')}
         </div>`;
       const sterileCompact = sterileInstock.slice(0,3).map(p => `
-        <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-          <div style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px">` : ''}
+        <a href="${outLink(p.url,'sterile_compact')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
+          <div class="hbj-compact">
+            ${p.image ? `<img src="${p.image}" alt="">` : ''}
             <div style="flex:1; font-size:13px; line-height:1.25">
               <div style="font-weight:600">${p.title}</div>
               ${p.price ? `<div style="opacity:.85; margin-top:2px">${p.price}</div>` : ''}
@@ -421,10 +422,7 @@ async function respondForQuery(q){
           <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
           ${sterileCompact}
           <div style="margin-top:8px">
-            <a href="${STERILIZED_CAT}" target="_blank"
-               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-              Open Full Sterilized Category
-            </a>
+            <a href="${outLink(STERILIZED_CAT,'sterile_category')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Open Full Sterilized Category</a>
           </div>
         </div>`;
     }
@@ -443,14 +441,12 @@ async function respondForQuery(q){
           <li>Sleep on clean linens; avoid pools/hot tubs for 2 weeks.</li>
         </ul>
         <div style="margin-top:8px">
-          <a href="${AFTERCARE_URL}" target="_blank"
-             style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-            Open Full Aftercare Page
-          </a>
+          <a href="${outLink(AFTERCARE_URL,'aftercare_cta')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Open Full Aftercare Page</a>
         </div>
       </div>`;
     return `
       <div style="font-size:14px">
+        ${style}
         ${top}
         ${foot}
       </div>`;
@@ -467,19 +463,17 @@ async function respondForQuery(q){
         <div style="font-weight:800; margin-bottom:6px">Need details?</div>
         <div style="font-size:13px; line-height:1.45">See full policy, carriers, and timelines.</div>
         <div style="margin-top:8px">
-          <a href="${SHIPPING_URL}" target="_blank"
-             style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-            Open Shipping & Returns Page
-          </a>
+          <a href="${outLink(SHIPPING_URL,'shipping_cta')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Open Shipping & Returns Page</a>
         </div>
       </div>`;
     return `
       <div style="font-size:14px">
+        ${style}
         ${top}
         ${foot}
       </div>`;
   } else if (it === 'course') {
-    let courseUrl = normalizeCourseUrl((RULES.course_url||'').trim());
+    const courseUrl = normalizeCourseUrl((RULES.course_url||'').trim());
     const prev = await getPreview(courseUrl);
     const top = `
       <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa; display:flex; gap:10px; align-items:center">
@@ -492,31 +486,30 @@ async function respondForQuery(q){
     const foot = `
       <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
         <div style="font-weight:800; margin-bottom:6px">Open Course Page</div>
-        <a href="${courseUrl}" target="_blank"
-           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
-          Go to Course
-        </a>
+        <a href="${outLink(courseUrl,'course_cta')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Go to Course</a>
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px">
-          <a href="${ABOUT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">About Us</a>
-          <a href="${CONTACT_URL}" target="_blank" style="flex:1 1 180px; text-align:center; text-decoration:underline">Contact / Interest List</a>
+          <a href="${outLink(ABOUT_URL,'course_about')}" target="_blank" rel="nofollow noopener" style="flex:1 1 180px; text-align:center; text-decoration:underline">About Us</a>
+          <a href="${outLink(CONTACT_URL,'course_contact')}" target="_blank" rel="nofollow noopener" style="flex:1 1 180px; text-align:center; text-decoration:underline">Contact / Interest List</a>
         </div>
       </div>`;
     return `
       <div style="font-size:14px">
+        ${style}
         ${top}
         ${foot}
       </div>`;
   }
 
-  // Default compose (sterile/general/kit)
-  const html = `
+  // Default compose
+  return `
     <div style="font-size:14px">
+      ${style}
       ${topPanel}
       ${footer}
     </div>`;
-  return html;
 }
 
+// ---------- API ----------
 app.post('/hbj/chat', async (req, res) => {
   try {
     const q = (req.body.q||'').toString().trim();
@@ -528,6 +521,7 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
+// Probes
 app.get('/hbj/probe', async (req, res) => {
   try {
     const type = (req.query.type || 'sterile').toString();
@@ -554,10 +548,10 @@ app.get('/hbj/probe', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, docs: DOCS.length, version: '1.9.0' }));
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.1' }));
 
 // ---------- Boot ----------
-(async function boot(){ await loadPages(); console.log('HBJ Bot v1.9.0 booted. Docs:', DOCS.length); })();
+(async function boot(){ await loadPages(); console.log('HBJ Bot v1.9.1 booted'); })();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));

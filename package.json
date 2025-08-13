@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.9.0",
-  "description": "HBJ chatbot backend \u2014 v1.9.0 (forced canonical Course URL guard)",
+  "version": "1.9.1",
+  "description": "HBJ chatbot backend \u2014 v1.9.1 (UTM + click tracking + mobile grid cap; canonical course guard)",
   "type": "module",
   "main": "server.js",
   "scripts": {
