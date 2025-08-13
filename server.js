@@ -1,7 +1,7 @@
 
-// server.js — HBJ Bot v2.0.1
-// Adds diagnostics + stronger contact triggers.
-// Health: GET /hbj/health → { version: "2.0.1" }
+// server.js — HBJ Bot v2.0.2
+// Change: "contact/email/message/reach out/call" now opens the store Contact page (no in-chat form).
+// Health: GET /hbj/health → { version: "2.0.2" }
 // Intent debug: GET /hbj/intent?q=... → { intent: "..." }
 
 import express from 'express';
@@ -38,8 +38,6 @@ const AFTERCARE_URL  = `${SITE}/Aftercare_ep_42-1.html`;
 const SHIPPING_URL   = `${SITE}/Shipping-and-Returns_ep_43-1.html`;
 const ABOUT_URL      = `${SITE}/About-Us_ep_7.html`;
 const CONTACT_URL    = `${SITE}/crm.asp?action=contactus`;
-
-const API_BASE = (process.env.PUBLIC_BASE || process.env.RENDER_EXTERNAL_URL || 'https://hbj-bot.onrender.com').replace(/\/+$/,'');
 
 // ---------- Rules ----------
 let RULES = { course_url: '' };
@@ -300,40 +298,18 @@ function cardHTML(p){
     </form>`;
 }
 
-// ---------- Contact composer ----------
+// ---------- Contact composer (opens your store contact page) ----------
 function composeContact(){
-  const action = `${API_BASE}/hbj/contact`; const fallback = `${SITE}/crm.asp?action=contactus`;
-  const html = `
-    <div style="margin:6px 0 10px 0; font-weight:800">Send us a message</div>
-    <form action="${action}" method="POST" target="_blank"
-          style="display:block;border:1px solid #eee;border-radius:12px;padding:12px;background:#fafafa">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <input name="name" placeholder="Your name" required
-               style="padding:10px;border:1px solid #ddd;border-radius:8px">
-        <input name="email" type="email" placeholder="Your email" required
-               style="padding:10px;border:1px solid #ddd;border-radius:8px">
-      </div>
-      <div style="margin-top:8px">
-        <input name="phone" placeholder="Phone (optional)"
-               style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px">
-      </div>
-      <div style="margin-top:8px">
-        <textarea name="message" placeholder="How can we help?" rows="4" required
-                  style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px"></textarea>
-      </div>
-      <input type="hidden" name="site" value="${SITE}">
-      <div style="margin-top:10px">
-        <button type="submit"
-          style="background:#0b5fff!important;color:#fff!important;padding:10px 14px;border-radius:10px;
-                 font-weight:900!important;border:0;cursor:pointer">
-          Send message
-        </button>
-      </div>
-    </form>
-    <div style="margin-top:8px;font-size:12px;color:#333">
-      Prefer a page? ${formBtn(fallback, 'Open Contact Page')}
+  const top = `
+    <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
+      <div style="font-weight:800; margin-bottom:6px">Contact Us</div>
+      <div style="font-size:13px; line-height:1.45">Tap below to open our contact page.</div>
     </div>`;
-  return shell(html);
+  const foot = `
+    <div style="margin-top:8px">
+      ${formBtn(CONTACT_URL, 'Open Contact Page')}
+    </div>`;
+  return shell(`${top}${foot}`);
 }
 
 // ---------- Composers (kits, sterile, etc.) ----------
@@ -472,51 +448,6 @@ async function composeCourse(){
   return shell(`${top}${foot}`);
 }
 
-// ---------- Contact endpoint ----------
-function sanitize(s=''){ return String(s).replace(/[<>]/g,'').trim(); }
-
-app.post('/hbj/contact', async (req, res) => {
-  try {
-    const name = sanitize(req.body.name);
-    const email = sanitize(req.body.email);
-    const phone = sanitize(req.body.phone);
-    const message = sanitize(req.body.message);
-    if (!name || !email || !message || !/@/.test(email)){
-      return res.status(400).send('Missing required fields.');
-    }
-    console.log(JSON.stringify({ event:'hbj.contact', name, email, phone, message, ts: new Date().toISOString() }));
-
-    try {
-      if (process.env.SMTP_HOST && process.env.CONTACT_TO) {
-        const nodemailer = (await import('nodemailer')).default;
-        const transporter = nodemailer.createTransport({
-          host: process.env.SMTP_HOST,
-          port: Number(process.env.SMTP_PORT || 587),
-          secure: false,
-          auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined
-        });
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || 'hbj-bot@hottiebodyjewelry.com',
-          to: process.env.CONTACT_TO,
-          subject: `HBJ Contact: ${name}`,
-          text: `Name: ${name}\nEmail: ${email}\nPhone: ${phone}\n\n${message}`
-        });
-      }
-    } catch (_) { /* non-fatal */ }
-    res.set('Content-Type','text/html');
-    res.send(`
-      <meta name="viewport" content="width=device-width,initial-scale=1">
-      <div style="font-family:system-ui,Arial;padding:20px;max-width:560px;margin:20px auto;border:1px solid #eee;border-radius:12px">
-        <h2>Thanks, ${name}!</h2>
-        <p>We received your message and will get back to <b>${email}</b>.</p>
-        <p style="margin-top:10px"><a href="${CONTACT_URL}">Open the Contact page</a> if you prefer.</p>
-      </div>
-    `);
-  } catch (e) {
-    res.status(200).send('Thanks—your message was received.');
-  }
-});
-
 // ---------- API ----------
 function normQuery(q){ return cleanText((q||'').toLowerCase()); }
 
@@ -572,7 +503,7 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '2.0.1', api_base: API_BASE }));
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '2.0.2' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
