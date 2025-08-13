@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.9.1",
-  "description": "HBJ chatbot backend \u2014 v1.9.1 (UTM + click tracking + mobile grid cap; canonical course guard)",
+  "version": "1.9.2",
+  "description": "HBJ chatbot backend \u2014 v1.9.2 (perf: caching, keep-alive, limited concurrency, gzip)",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -12,6 +12,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "compression": "^1.7.4"
   }
 }

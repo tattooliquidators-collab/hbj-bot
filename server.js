@@ -1,11 +1,10 @@
 
-// server.js — HBJ Bot v1.9.1
-// Hard fixes:
-//  - Canonical course URL guard (normalizes to https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING-SOON_p_363.html if malformed)
-//  - All outbound links get UTM + cache-bust
-//  - Click tracking via /hbj/out redirect (logs to server console)
-//  - Mobile grid capped at 2 cols via embedded <style>
-// Existing behavior preserved: kit asks question only; sterile/aftercare/shipping/course panels.
+// server.js — HBJ Bot v1.9.2 (Performance)
+// - TTL caches (page/category/home specials/chat html)
+// - Listing-page parse first, limited product fetches (concurrency 4)
+// - HTTP keep-alive agent
+// - gzip compression
+// - Preserves: canonical course guard, UTM/out links, mobile grid cap, click tracking
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -13,10 +12,14 @@ import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import fs from 'fs';
+import compression from 'compression';
+import * as https from 'node:https';
+import * as http from 'node:http';
 
 dotenv.config();
 const app = express();
 app.use(express.json());
+app.use(compression());
 
 // ---------- CORS ----------
 const ALLOWED_ORIGINS = [
@@ -64,15 +67,40 @@ const HEADERS = {
   'Accept-Language': 'en-US,en;q=0.9'
 };
 
-async function get(url){
-  const r = await fetch(url, { redirect: 'follow', headers: HEADERS });
+const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 32 });
+const keepAliveHttp  = new http.Agent({ keepAlive: true, maxSockets: 32 });
+function agentFor(url){ return url.startsWith('https') ? keepAliveHttps : keepAliveHttp; }
+
+// Simple TTL cache
+function makeCache(){ return new Map(); }
+function cacheGet(map, key, maxAgeMs){
+  const v = map.get(key);
+  if (!v) return null;
+  if ((Date.now() - v.t) > maxAgeMs) { map.delete(key); return null; }
+  return v.value;
+}
+function cacheSet(map, key, value){ map.set(key, { t: Date.now(), value }); }
+
+const CACHE = {
+  page: makeCache(),          // url -> html
+  category: makeCache(),      // url -> items[]
+  homespecials: makeCache(),  // 'homespecials' -> items[]
+  chat: makeCache()           // normQuery -> html
+};
+
+async function get(url, ttlMs=5*60*1000){
+  const cached = cacheGet(CACHE.page, url, ttlMs);
+  if (cached) return cached;
+  const r = await fetch(url, { redirect: 'follow', headers: HEADERS, agent: agentFor(url) });
   if (!r.ok) throw new Error(`GET ${url} ${r.status}`);
-  return await r.text();
+  const txt = await r.text();
+  cacheSet(CACHE.page, url, txt);
+  return txt;
 }
 
 async function getPreview(url){
   try{
-    const h = await get(url);
+    const h = await get(url, 30*60*1000); // 30min
     const $ = cheerio.load(h);
     const title = cleanText($('title').first().text()) || url;
     let img = $('meta[property="og:image"]').attr('content') ||
@@ -154,14 +182,14 @@ const SYN = {
 };
 function parseGauge(q){ const m = q.match(/\b(10|12|14|16|18|20|22|8|6)\s*g\b/i); return m ? m[1] : null; }
 
-// ---------- UTM + Outbound redirect helpers ----------
+// UTM + Outbound redirect helpers
 function utmize(rawUrl, campaign='general', extra={}) {
   try {
     const u = new URL(rawUrl);
     u.searchParams.set('utm_source','hbjbot');
     u.searchParams.set('utm_medium','chat');
     u.searchParams.set('utm_campaign', campaign);
-    u.searchParams.set('hbjbot','1'); // cache-bust / CDN bypass hint
+    u.searchParams.set('hbjbot','1');
     for (const [k,v] of Object.entries(extra||{})) if (v!=null) u.searchParams.set(k, String(v));
     return u.toString();
   } catch { return rawUrl; }
@@ -172,7 +200,7 @@ function outLink(rawUrl, campaign='general', extra={}) {
   return `/hbj/out?u=${target}&ctx=${ctx}`;
 }
 
-// ---------- Click redirect ----------
+// Click redirect
 app.get('/hbj/out', (req, res) => {
   try {
     const url = decodeURIComponent(req.query.u || '');
@@ -180,14 +208,10 @@ app.get('/hbj/out', (req, res) => {
     const ua = req.headers['user-agent'] || '';
     const ref = req.headers['referer'] || '';
     const ip = req.headers['x-forwarded-for'] || req.ip;
-    console.log(JSON.stringify({
-      event:'hbj.click', ctx, url, ip, ua, ref, ts: new Date().toISOString()
-    }));
+    console.log(JSON.stringify({ event:'hbj.click', ctx, url, ip, ua, ref, ts: new Date().toISOString() }));
     if (!/^https?:\/\//i.test(url)) return res.status(400).send('Bad URL');
     return res.redirect(302, url);
-  } catch (e) {
-    return res.status(400).send('Bad URL');
-  }
+  } catch (e) { return res.status(400).send('Bad URL'); }
 });
 
 // ---------- Pages config ----------
@@ -201,7 +225,7 @@ async function loadPages() {
   for (const entry of (PAGES.pages || [])) {
     const url = entry.url; const selector = entry.selector || 'body';
     try {
-      const h = await get(url);
+      const h = await get(url, 60*60*1000);
       const $ = cheerio.load(h);
       const title = cleanText($('title').first().text()) || url;
       const text = cleanText($(selector).text());
@@ -214,69 +238,121 @@ async function loadPages() {
   }
 }
 
+// ---------- Concurrency helper ----------
+async function mapLimit(arr, limit, fn){
+  const ret = new Array(arr.length);
+  let i = 0;
+  const workers = Array(Math.min(limit, arr.length)).fill(0).map(async () => {
+    while (true) {
+      const idx = i++; if (idx >= arr.length) break;
+      try { ret[idx] = await fn(arr[idx], idx); } catch { ret[idx] = null; }
+    }
+  });
+  await Promise.all(workers);
+  return ret.filter(Boolean);
+}
+
 // ---------- Product harvesting/search ----------
 function looksProductHref(href=''){ return /_p_\d+(\.html)?|\/p-\d+|ProductDetails\.asp|product\.asp|\/product\/\d+/i.test(href); }
 
+function parseListing($, baseUrl){
+  // Try to parse products from the listing/search page without visiting each product
+  const items = [];
+  const cards = $('a, div');
+  const seen = new Set();
+  cards.each((_, el) => {
+    const $el = $(el);
+    let href = $el.attr('href') || $el.find('a').attr('href') || '';
+    if (!href || !looksProductHref(href)) return;
+    const url = abs(href, baseUrl);
+    if (seen.has(url)) return;
+    let title = cleanText($el.attr('title') || $el.find('h3,h2,.name,.ProductName,.productname').first().text() || $el.text()).slice(0,120);
+    title = title || 'Product';
+    let price = cleanText($el.find('.SalePrice,.OurPrice,.price,.Price,.product-price').first().text());
+    const imgEl = $el.find('img').first();
+    let image = imgEl.attr('data-src') || imgEl.attr('src') || '';
+    if (image) image = abs(image, baseUrl);
+    items.push({ title, url, price, image });
+    seen.add(url);
+  });
+  // Basic quality filter
+  return items.filter(it => it.title && it.url).slice(0, 24);
+}
+
 async function harvestProductsFromCategory(categoryUrl){
+  const cached = cacheGet(CACHE.category, categoryUrl, 15*60*1000);
+  if (cached) return cached;
   const out = [];
   try {
-    const h = await get(categoryUrl);
+    const h = await get(categoryUrl, 10*60*1000);
     const $ = cheerio.load(h);
-    const links = new Set();
-    $('a').each((_, a) => {
-      const href = $(a).attr('href') || '';
-      if (looksProductHref(href)) links.add(abs(href, categoryUrl));
-    });
-    for (const link of Array.from(links).slice(0, 30)) {
+    let items = parseListing($, categoryUrl);
+
+    // If listing lacks price/image, enrich by fetching limited product pages
+    const needEnrich = items.filter(it => !it.price || !it.image).slice(0, 8).map(it => it.url);
+    const enrichPages = await mapLimit(needEnrich, 4, async (link) => {
       try {
-        const ph = await get(link);
+        const ph = await get(link, 20*60*1000);
         const $$ = cheerio.load(ph);
         const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
         const price = extractPrice($$);
         const image = extractImage($$, link);
         const instock = detectStock($$);
-        out.push({ title, url: link, price, image, instock });
-      } catch { }
-    }
-  } catch { }
+        return { title, url: link, price, image, instock };
+      } catch { return null; }
+    });
+    // Merge enrich
+    const byUrl = new Map(items.map(it => [it.url, it]));
+    for (const p of enrichPages) if (p) byUrl.set(p.url, { ...byUrl.get(p.url), ...p });
+    // If still light, fetch a few more product pages (limit total to 16)
+    const links = new Set(items.map(it => it.url));
+    const extra = Array.from(links).slice(0,16 - byUrl.size);
+    const extraPages = await mapLimit(extra, 4, async (link) => {
+      try {
+        const ph = await get(link, 20*60*1000);
+        const $$ = cheerio.load(ph);
+        const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
+        const price = extractPrice($$);
+        const image = extractImage($$, link);
+        const instock = detectStock($$);
+        return { title, url: link, price, image, instock };
+      } catch { return null; }
+    });
+    for (const p of extraPages) if (p) byUrl.set(p.url, { ...byUrl.get(p.url), ...p });
+
+    // Finalize
+    for (const v of byUrl.values()) out.push(v);
+  } catch {}
+  cacheSet(CACHE.category, categoryUrl, out);
   return out;
 }
 
 async function harvestHomeSpecialKits(){
+  const key = 'homespecials';
+  const cached = cacheGet(CACHE.homespecials, key, 10*60*1000);
+  if (cached) return cached;
   const out = [];
   try {
-    const h = await get(HOME);
+    const h = await get(HOME, 5*60*1000);
     const $ = cheerio.load(h);
-    const links = new Set();
-    $('a').each((_, a) => {
-      const href = $(a).attr('href') || '';
-      const text = cleanText($(a).text() || '');
-      if (looksProductHref(href) && (/kit/i.test(text) || $(a).closest('section, div').text().toLowerCase().includes('home specials') || $(a).closest('section, div').text().toLowerCase().includes('special'))) {
-        links.add(abs(href, HOME));
-      }
-    });
-    if (links.size < 6) {
-      $('a').each((_, a) => {
-        const href = $(a).attr('href') || '';
-        if (looksProductHref(href)) links.add(abs(href, HOME));
-      });
-    }
-    for (const link of Array.from(links).slice(0, 24)) {
+    const items = parseListing($, HOME).filter(it => /kit/i.test(it.title));
+    // Enrich a bit
+    const links = items.slice(0, 12).map(it => it.url);
+    const pages = await mapLimit(links, 4, async (link) => {
       try {
-        const ph = await get(link);
+        const ph = await get(link, 20*60*1000);
         const $$ = cheerio.load(ph);
         const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
-        if (!/kit/i.test(title)) continue;
         const price = extractPrice($$);
         const image = extractImage($$, link);
         const instock = detectStock($$);
-        out.push({ title, url: link, price, image, instock });
-      } catch { }
-    }
-  } catch { }
-  const seen = new Set(); const uniq = [];
-  for (const p of out) { if (seen.has(p.url)) continue; seen.add(p.url); uniq.push(p); }
-  return uniq;
+        return { title, url: link, price, image, instock };
+      } catch { return null; }
+    });
+    for (const p of pages) if (p) out.push(p);
+  } catch {}
+  cacheSet(CACHE.homespecials, key, out);
+  return out;
 }
 
 function expandQuery(q){
@@ -286,36 +362,36 @@ function expandQuery(q){
   return `${q} ${add.join(' ')}`.trim();
 }
 async function searchProductsOnDemand(q){
-  const q2 = expandQuery(q);
-  const url = `${SITE}/search.asp?keyword=${encodeURIComponent(q2)}`;
-  let items = [];
+  const out = [];
   try {
-    const html = await get(url);
+    const q2 = expandQuery(q);
+    const url = `${SITE}/search.asp?keyword=${encodeURIComponent(q2)}`;
+    const html = await get(url, 5*60*1000);
     const $ = cheerio.load(html);
-    const links = new Set();
-    $('a').each((_, a) => {
-      const href = $(a).attr('href') || '';
-      const text = cleanText($(a).text() || '');
-      if (looksProductHref(href) && text.length >= 1) links.add(abs(href, SITE));
-    });
-    for (const link of Array.from(links).slice(0, 18)) {
+    let items = parseListing($, url);
+    // Enrich first 8
+    const enrich = items.slice(0, 8).map(it => it.url);
+    const pages = await mapLimit(enrich, 4, async (link) => {
       try {
-        const ph = await get(link);
+        const ph = await get(link, 20*60*1000);
         const $$ = cheerio.load(ph);
         const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
         const price = extractPrice($$);
         const image = extractImage($$, link);
         const instock = detectStock($$);
-        items.push({ title, url: link, price, image, instock });
-      } catch { }
-    }
-  } catch { }
-  return items;
+        return { title, url: link, price, image, instock };
+      } catch { return null; }
+    });
+    const byUrl = new Map(items.map(it => [it.url, it]));
+    for (const p of pages) if (p) byUrl.set(p.url, { ...byUrl.get(p.url), ...p });
+    for (const v of byUrl.values()) out.push(v);
+  } catch {}
+  return out;
 }
 
 function scoreAgainstQuery(q, p){
   let s = 0;
-  const t = p.title.toLowerCase(), ql = q.toLowerCase();
+  const t = p.title?.toLowerCase() || '', ql = q.toLowerCase();
   for (const w of ql.split(/\s+/)) if (w && t.includes(w)) s += 1;
   for (const k in SYN) if (SYN[k].some(tk => ql.includes(tk) && t.includes(tk))) s += 2;
   const g = parseGauge(q); if (g && t.includes(`${g}g`)) s += 3;
@@ -337,10 +413,23 @@ function intentOf(q){
 }
 
 // ---------- Response compose ----------
-async function respondForQuery(q){
-  const it = intentOf((q||'').toString());
+function htmlShell(body){
+  const style = `
+    <style>
+      .hbj-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
+      @media (max-width:520px) { .hbj-grid { grid-template-columns: repeat(2, 1fr) !important; } }
+      .hbj-card { border:1px solid #eee; border-radius:12px; padding:10px; }
+      .hbj-img { width:100%; height:120px; object-fit:cover; border-radius:8px }
+      .hbj-btn { display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700 }
+      .hbj-compact { display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2 }
+      .hbj-compact img { width:42px; height:42px; object-fit:cover; border-radius:6px }
+    </style>`;
+  return `<div style="font-size:14px">${style}${body}</div>`;
+}
+
+async function composeForIntent(it, qq){
   let items = [];
-  if (it === 'general' || it === 'sterile') items = await searchProductsOnDemand(q);
+  if (it === 'general' || it === 'sterile') items = await searchProductsOnDemand(qq);
 
   let sterileHarvest = [];
   if (it === 'sterile') {
@@ -352,49 +441,35 @@ async function respondForQuery(q){
   let homeKits = [];
   if (it === 'kit') homeKits = await harvestHomeSpecialKits();
 
-  const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
-
-  const style = `
-    <style>
-      .hbj-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
-      @media (max-width:520px) { .hbj-grid { grid-template-columns: repeat(2, 1fr) !important; } }
-      .hbj-card { border:1px solid #eee; border-radius:12px; padding:10px; }
-      .hbj-img { width:100%; height:120px; object-fit:cover; border-radius:8px }
-      .hbj-btn { display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700 }
-      .hbj-compact { display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2 }
-      .hbj-compact img { width:42px; height:42px; object-fit:cover; border-radius:6px }
-    </style>`;
-
-  let topPanel = '';
-  let footer = '';
+  const ranked = items.map(p => ({...p, score: scoreAgainstQuery(qq, p)})).sort((a,b)=>b.score-a.score);
 
   if (it === 'kit') {
     const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
-    if (kitsInStock.length){
-      topPanel = `
-        <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
-        <div class="hbj-grid">
-          ${kitsInStock.map(p => `
-            <a href="${outLink(p.url,'kit_card')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
-              <div class="hbj-card">
-                ${p.image ? `<img src="${p.image}" alt="" class="hbj-img">` : ''}
-                <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
-                ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-              </div>
-            </a>
-          `).join('')}
-        </div>`;
-    } else {
-      topPanel = `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing and I’ll show options.</div>`;
-    }
-    footer = `
+    const grid = kitsInStock.length ? `
+      <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
+      <div class="hbj-grid">
+        ${kitsInStock.map(p => `
+          <a href="${outLink(p.url,'kit_card')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
+            <div class="hbj-card">
+              ${p.image ? `<img src="${p.image}" alt="" class="hbj-img">` : ''}
+              <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
+              ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+            </div>
+          </a>
+        `).join('')}
+      </div>` : `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing and I’ll show options.</div>`;
+
+    const footer = `
       <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
         <div style="font-weight:700;">What kind of piercing kit are you looking for?</div>
       </div>`;
-  } else if (it === 'sterile') {
+    return htmlShell(`${grid}${footer}`);
+  }
+
+  if (it === 'sterile') {
     const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
     if (sterileInstock.length){
-      topPanel = `
+      const grid = `
         <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
         <div class="hbj-grid">
           ${sterileInstock.map(p => `
@@ -407,7 +482,7 @@ async function respondForQuery(q){
             </a>
           `).join('')}
         </div>`;
-      const sterileCompact = sterileInstock.slice(0,3).map(p => `
+      const compact = sterileInstock.slice(0,3).map(p => `
         <a href="${outLink(p.url,'sterile_compact')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
           <div class="hbj-compact">
             ${p.image ? `<img src="${p.image}" alt="">` : ''}
@@ -417,16 +492,19 @@ async function respondForQuery(q){
             </div>
           </div>
         </a>`).join('');
-      footer = `
+      const footer = `
         <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
           <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
-          ${sterileCompact}
+          ${compact}
           <div style="margin-top:8px">
             <a href="${outLink(STERILIZED_CAT,'sterile_category')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Open Full Sterilized Category</a>
           </div>
         </div>`;
+      return htmlShell(`${grid}${footer}`);
     }
-  } else if (it === 'aftercare') {
+  }
+
+  if (it === 'aftercare') {
     const top = `
       <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
         <div style="font-weight:800; margin-bottom:6px">Aftercare Essentials</div>
@@ -444,13 +522,10 @@ async function respondForQuery(q){
           <a href="${outLink(AFTERCARE_URL,'aftercare_cta')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Open Full Aftercare Page</a>
         </div>
       </div>`;
-    return `
-      <div style="font-size:14px">
-        ${style}
-        ${top}
-        ${foot}
-      </div>`;
-  } else if (it === 'shipping') {
+    return htmlShell(`${top}${foot}`);
+  }
+
+  if (it === 'shipping') {
     const top = `
       <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
         <div style="font-weight:800; margin-bottom:6px">Shipping & Returns</div>
@@ -466,13 +541,10 @@ async function respondForQuery(q){
           <a href="${outLink(SHIPPING_URL,'shipping_cta')}" target="_blank" rel="nofollow noopener" class="hbj-btn">Open Shipping & Returns Page</a>
         </div>
       </div>`;
-    return `
-      <div style="font-size:14px">
-        ${style}
-        ${top}
-        ${foot}
-      </div>`;
-  } else if (it === 'course') {
+    return htmlShell(`${top}${foot}`);
+  }
+
+  if (it === 'course') {
     const courseUrl = normalizeCourseUrl((RULES.course_url||'').trim());
     const prev = await getPreview(courseUrl);
     const top = `
@@ -492,28 +564,25 @@ async function respondForQuery(q){
           <a href="${outLink(CONTACT_URL,'course_contact')}" target="_blank" rel="nofollow noopener" style="flex:1 1 180px; text-align:center; text-decoration:underline">Contact / Interest List</a>
         </div>
       </div>`;
-    return `
-      <div style="font-size:14px">
-        ${style}
-        ${top}
-        ${foot}
-      </div>`;
+    return htmlShell(`${top}${foot}`);
   }
 
-  // Default compose
-  return `
-    <div style="font-size:14px">
-      ${style}
-      ${topPanel}
-      ${footer}
-    </div>`;
+  // general default
+  return htmlShell(`<div>Tell me what you’re looking for and I’ll pull it up.</div>`);
 }
+
+function normQuery(q){ return cleanText((q||'').toLowerCase()); }
 
 // ---------- API ----------
 app.post('/hbj/chat', async (req, res) => {
   try {
     const q = (req.body.q||'').toString().trim();
-    const html = await respondForQuery(q);
+    const key = normQuery(q);
+    const cached = cacheGet(CACHE.chat, key, 60*1000); // 60s per identical query
+    if (cached) return res.json({ html: cached });
+    const it = intentOf(key);
+    const html = await composeForIntent(it, key);
+    cacheSet(CACHE.chat, key, html);
     res.json({ html });
   } catch (e) {
     console.error('Chat error:', e);
@@ -535,7 +604,8 @@ app.get('/hbj/probe', async (req, res) => {
       return res.json({ ok:true, type, count: kits.length, sample: kits.slice(0,8) });
     }
     if (type === 'kit') {
-      const html = await respondForQuery('piercing kit');
+      const it = 'kit';
+      const html = await composeForIntent(it, 'piercing kit');
       return res.json({ ok:true, type, html });
     }
     let url = STERILIZED_CAT;
@@ -548,10 +618,22 @@ app.get('/hbj/probe', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.1' }));
+app.get('/hbj/cache', (_,res) => {
+  res.json({
+    ok:true,
+    sizes: {
+      page: CACHE.page.size,
+      category: CACHE.category.size,
+      homespecials: CACHE.homespecials.size,
+      chat: CACHE.chat.size
+    }
+  });
+});
+
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.2' }));
 
 // ---------- Boot ----------
-(async function boot(){ await loadPages(); console.log('HBJ Bot v1.9.1 booted'); })();
+(async function boot(){ await loadPages(); console.log('HBJ Bot v1.9.2 booted'); })();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
