@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.7.2",
-  "description": "HBJ chatbot backend — hotfix v1.7.2 (price parser + sterile priority)",
+  "version": "1.7.4",
+  "description": "HBJ chatbot backend — hotfix v1.7.4 (Aftercare CTA exact link + prior fixes)",
   "type": "module",
   "main": "server.js",
   "scripts": {

@@ -1,5 +1,6 @@
-// server.js — HBJ Bot Hotfix v1.7.2
-// Fixes price parsing (no more "149.9959.95"), strengthens sterile category display.
+// server.js — HBJ Bot Hotfix v1.7.4
+// - Adds Aftercare CTA linking EXACTLY to Aftercare_ep_42-1.html
+// - Preserves v1.7.3 (Sterilized CTA exact link + price parser + category harvesting + OOS policy)
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -33,6 +34,7 @@ const SITE = 'https://www.hottiebodyjewelry.com';
 const STERILIZED_CAT = `${SITE}/Sterilized-Body-Jewelry_c_42.html`;
 const PRO_KITS_CAT = `${SITE}/Professional-Piercing-Kits_c_7.html`;
 const SAFE_KITS_CAT = `${SITE}/Safe-and-Sterile-Piercing-Kits_c_1.html`;
+const AFTERCARE_URL = `${SITE}/Aftercare_ep_42-1.html`;
 let DOCS = []; // {url, title, text, image}
 
 // ---------- Rules / KB ----------
@@ -72,14 +74,12 @@ function extractImage($$ , pageUrl){
 
 // Robust price finder: prefer schema/meta, else prefer "sale/now/your price", else pick the smallest $
 function extractPrice($$){
-  // 1) Schema.org / meta
   let content = $$('meta[itemprop="price"]').attr('content') ||
                 $$('[itemprop=price]').first().text();
   if (content) {
     const m = (content.match(/[\d\.,]+/)||[])[0];
     if (m) return `$${m.replace(/,/g,'')}`;
   }
-  // 2) Common price blocks
   const blocks = $$('[class*=Price], .price, .ProductPrice, #price, .sale, .SalePrice, .OurPrice, .retail, .RetailPrice');
   let candidates = [];
   blocks.each((_, el)=>{
@@ -87,7 +87,6 @@ function extractPrice($$){
     const money = Array.from(txt.matchAll(/\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})/g)).map(m=>m[0]);
     if (money.length){
       const label = txt.toLowerCase();
-      // mark money with a bias score (sale/now preferred)
       money.forEach(val => {
         let score = 0;
         if (/sale|now|your price|our price|special/i.test(label)) score += 2;
@@ -97,7 +96,6 @@ function extractPrice($$){
     }
   });
   if (candidates.length){
-    // sort by score desc, then numeric asc (sale price usually lower)
     candidates.sort((a,b)=> (b.score - a.score) || (parseFloat(a.val.replace(/[$,]/g,'')) - parseFloat(b.val.replace(/[$,]/g,''))));
     const best = candidates[0].val;
     return best.startsWith('$') ? best : `$${best}`;
@@ -167,7 +165,7 @@ function scoreDoc(q, d){
   let s = 0, hay = d.text.toLowerCase();
   for (const t of terms) if (hay.includes(t)) s += 2;
   if (/ship|delivery|return|refund/i.test(q) && /ship|return|refund/i.test(hay)) s += 5;
-  if (/aftercare|clean|saline|healing/i.test(q) && /aftercare|clean|saline|healing/i.test(hay)) s += 5;
+  if (/aftercare|after care|clean|saline|healing/i.test(q) && /aftercare|clean|saline|healing/i.test(hay)) s += 5;
   if (/steril/i.test(q) && /steril/i.test(hay)) s += 5;
   if (/kit/i.test(q) && /kit/i.test(hay)) s += 3;
   return s;
@@ -328,6 +326,24 @@ app.post('/hbj/chat', async (req, res) => {
       `).join('')}`;
     }
 
+    // CTAs with exact links
+    const sterileCTA = mentionSterile ? `
+      <div style="margin:10px 0">
+        <a href="${STERILIZED_CAT}" target="_blank"
+           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
+          Browse Sterilized Body Jewelry
+        </a>
+      </div>` : '';
+
+    const wantAftercare = /(aftercare|after care|care instructions|clean|saline|healing)/i.test(q);
+    const aftercareCTA = wantAftercare ? `
+      <div style="margin:10px 0">
+        <a href="${AFTERCARE_URL}" target="_blank"
+           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
+          Read Aftercare Instructions
+        </a>
+      </div>` : '';
+
     const defaultBlurb = `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
     const sourceBlock = docHit ? `
       <div style="margin:8px 0; padding:10px; background:#fafafa; border:1px solid #eee; border-radius:10px; display:flex; gap:10px; align-items:center">
@@ -342,6 +358,8 @@ app.post('/hbj/chat', async (req, res) => {
       <div style="font-size:14px">
         ${sourceBlock}
         <div style="margin:6px 0">${kb || defaultBlurb}</div>
+        ${sterileCTA}
+        ${aftercareCTA}
         ${oosBlock}
         ${cards || `<div>No in-stock matches.</div>`}
       </div>`;
@@ -374,7 +392,7 @@ app.get('/hbj/health', (_,res)=>{
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot Hotfix v1.7.2 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot Hotfix v1.7.4 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
