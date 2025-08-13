@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.8.9",
-  "description": "HBJ chatbot backend — v1.8.9 (kit footer question only; course URL from rules.json)",
+  "version": "1.9.0",
+  "description": "HBJ chatbot backend \u2014 v1.9.0 (forced canonical Course URL guard)",
   "type": "module",
   "main": "server.js",
   "scripts": {

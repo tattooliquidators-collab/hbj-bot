@@ -1,11 +1,9 @@
-// server.js — HBJ Bot v1.8.9
-// Behavior:
-//  - "Find a kit": shows Home Specials kits grid, then ONLY the question line (no options).
-//  - "Sterilized jewelry": shows products grid + compact picks footer.
-//  - "Aftercare", "Shipping": info panel + CTA footer.
-//  - "Course": opens course page even if OOS (URL from rules.json).
-//  - Answer-last: the last element is the actionable footer/question.
-// Probes: /hbj/health, /hbj/probe?type=course|shipping|homespecials|kit|prokits|safekits
+
+// server.js — HBJ Bot v1.9.0
+// Fix: Course URL is hard-guarded. If rules.json is missing or has a truncated value
+// (e.g., ends at ...COMING), we FORCE the canonical URL:
+// https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING-SOON_p_363.html
+// Also retains: kit flow question-only; sterilized/aftercare/shipping as before.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -26,13 +24,7 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173'
 ];
-app.use(cors({
-  origin: function (origin, cb) {
-    if (!origin) return cb(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(null, false);
-  }
-}));
+app.use(cors({ origin: (origin, cb) => (!origin || ALLOWED_ORIGINS.includes(origin)) ? cb(null, true) : cb(null, false) }));
 
 // ---------- Globals ----------
 const SITE = 'https://www.hottiebodyjewelry.com';
@@ -50,6 +42,19 @@ let DOCS = []; // {url, title, text, image}
 // ---------- Rules / KB ----------
 let RULES = { faqs:{}, promote_first:[], aliases:{}, course_url:'' };
 try { RULES = JSON.parse(fs.readFileSync('./rules.json','utf8')); } catch {}
+
+// Canonical course URL guard
+const CANON_COURSE = 'https://www.hottiebodyjewelry.com/Master-Body-Piercing-Class-COMING-SOON_p_363.html';
+function normalizeCourseUrl(raw) {
+  const v = (raw||'').trim();
+  if (!v) return CANON_COURSE;
+  // If it looks like the COMING slug but isn't the full page, force canonical
+  if (/Master-Body-Piercing-Class-COMING($|[^-S])/.test(v)) return CANON_COURSE;
+  // If it doesn't end with .html, or isn't _p_363, also force canonical
+  if (!/\.html($|\?)/i.test(v)) return CANON_COURSE;
+  if (!/_p_363\.html($|\?)/.test(v)) return CANON_COURSE;
+  return v;
+}
 
 // ---------- Pages config ----------
 let PAGES = { pages: [] };
@@ -122,7 +127,6 @@ function extractPrice($$){
     }
   });
   if (candidates.length){
-    // prefer higher scored; tie-breaker prefers lower price (more likely the sale price)
     candidates.sort((a,b)=> (b.score - a.score) || (parseFloat(a.val.replace(/[$,]/g,'')) - parseFloat(b.val.replace(/[$,]/g,''))));
     const best = candidates[0].val;
     return best.startsWith('$') ? best : `$${best}`;
@@ -339,7 +343,6 @@ function intentOf(q){
 // ---------- Route ----------
 async function respondForQuery(q){
   let qq = (q||'').toString().trim();
-
   const it = intentOf(qq);
 
   let items = [];
@@ -476,7 +479,7 @@ async function respondForQuery(q){
         ${foot}
       </div>`;
   } else if (it === 'course') {
-    const courseUrl = (RULES.course_url||'').trim() || ABOUT_URL;
+    let courseUrl = normalizeCourseUrl((RULES.course_url||'').trim());
     const prev = await getPreview(courseUrl);
     const top = `
       <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa; display:flex; gap:10px; align-items:center">
@@ -525,16 +528,14 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
-// Probes
 app.get('/hbj/probe', async (req, res) => {
   try {
     const type = (req.query.type || 'sterile').toString();
-    if (type === 'shipping') {
-      return res.json({ ok:true, type, url: '${SHIPPING_URL}' });
-    }
     if (type === 'course') {
-      return res.json({ ok:true, type, course_url: (JSON.parse(fs.readFileSync('./rules.json','utf8')).course_url || '') });
+      const course_url = normalizeCourseUrl((RULES.course_url||'').trim());
+      return res.json({ ok:true, type, course_url });
     }
+    if (type === 'shipping') return res.json({ ok:true, type, url: SHIPPING_URL });
     if (type === 'homespecials') {
       const kits = await harvestHomeSpecialKits();
       return res.json({ ok:true, type, count: kits.length, sample: kits.slice(0,8) });
@@ -553,15 +554,10 @@ app.get('/hbj/probe', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length, version: '1.8.9' });
-});
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, docs: DOCS.length, version: '1.9.0' }));
 
 // ---------- Boot ----------
-(async function boot(){
-  await loadPages();
-  console.log('HBJ Bot v1.8.9 booted. Docs:', DOCS.length);
-})();
+(async function boot(){ await loadPages(); console.log('HBJ Bot v1.9.0 booted. Docs:', DOCS.length); })();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
