@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.7.6",
-  "description": "HBJ chatbot backend — hotfix v1.7.6 (results-first layout + sticky CTA + collapsed details)",
+  "version": "1.7.8",
+  "description": "HBJ chatbot backend — hotfix v1.7.8 (answer-last guarantee; compact footer picks/CTA)",
   "type": "module",
   "main": "server.js",
   "scripts": {

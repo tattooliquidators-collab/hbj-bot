@@ -1,9 +1,8 @@
-// server.js — HBJ Bot Hotfix v1.7.6
-// Layout tweaks for visibility:
-// - Results shown first (cards/gallery), CTAs BELOW results
-// - Sticky Sterilized CTA at bottom so it doesn't scroll out of view
-// - Long page snippet in <details>
-// - Limit cards to 5
+// server.js — HBJ Bot Hotfix v1.7.8
+// Guarantee: the LAST visible part is the correct answer (so users don't have to scroll up).
+// - Sterilized flow: show gallery at top, and again a compact "Top Picks" footer + CTA at the very bottom. No generic recs.
+// - Aftercare flow: show panel at top, and a compact bullet + CTA footer at the bottom. No generic recs.
+// - Retains price parsing, category harvesting, OOS policy (only on direct ask), exact links.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -281,8 +280,11 @@ app.post('/hbj/chat', async (req, res) => {
     // Products via on-demand search
     let items = await searchProductsOnDemand(q);
 
-    // Sterile: always harvest the category when mentioned and build a dedicated gallery
+    // Flags
     const mentionSterile = /steril/i.test(q);
+    const wantAftercare = /(aftercare|after care|care instructions|clean|saline|healing)/i.test(q);
+
+    // Sterile: harvest category
     let sterileHarvest = [];
     if (mentionSterile) {
       sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
@@ -290,53 +292,17 @@ app.post('/hbj/chat', async (req, res) => {
       for (const it of sterileHarvest) if (!urls.has(it.url)) items.push(it);
     }
 
-    // Score and split
+    // Score (still used for direct OOS handling in special flows)
     const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
-    const sterileFirst = mentionSterile
-      ? ranked.sort((a,b)=> (b.title.toLowerCase().includes('steril') - a.title.toLowerCase().includes('steril')) || (b.score - a.score))
-      : ranked;
+    const oos = ranked.filter(p => p.instock === false).slice(0, 4);
 
-    const inStock = sterileFirst.filter(p => p.instock !== false).slice(0, 5);
-    const oos = sterileFirst.filter(p => p.instock === false).slice(0, 6);
-
-    const cards = inStock.map(p => `
-      <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
-        <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
-          ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
-          <div style="flex:1">
-            <div style="font-weight:600">${p.title}</div>
-            ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-            <div style="margin-top:6px"><span style="background:#111;color:#fff;padding:6px 10px;border-radius:8px">View</span></div>
-          </div>
-        </div>
-      </a>
-    `).join('');
-
-    // Only show OOS if explicitly asked or exact product
-    let oosBlock = '';
-    const directOOS = oos.filter(p => looksDirectAsk(q, p.title)).slice(0,2);
-    if (directOOS.length){
-      oosBlock = `
-      <div style="margin-top:10px; font-weight:600">Requested item (currently out of stock):</div>
-      ${directOOS.map(p => `
-        <div style="border:1px dashed #f2a; border-radius:12px; padding:10px; margin:6px 0; display:flex; gap:10px; align-items:center; opacity:.85">
-          ${p.image ? `<img src="${p.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
-          <div style="flex:1">
-            <div style="font-weight:600">${p.title} <span style="color:#b00; font-weight:700">— Out of stock</span></div>
-            ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
-            <div style="margin-top:6px"><a href="${p.url}" target="_blank" style="text-decoration:underline">View product page</a></div>
-          </div>
-        </div>
-      `).join('')}`;
-    }
-
-    // Sterile gallery (from category only), in-stock only
-    let sterileGallery = '';
+    // Sterilized gallery (top)
+    let sterileGalleryTop = '';
     if (mentionSterile && sterileHarvest.length){
-      const sterileInstock = sterileHarvest.filter(p => p.instock !== false).slice(0, 8);
+      const sterileInstock = sterileHarvest.filter(p => p.instock !== false).slice(0, 10);
       if (sterileInstock.length){
-        sterileGallery = `
-          <div style="margin:8px 0; font-weight:700">Sterilized Body Jewelry</div>
+        sterileGalleryTop = `
+          <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
           <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
             ${sterileInstock.map(p => `
               <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
@@ -351,63 +317,111 @@ app.post('/hbj/chat', async (req, res) => {
       }
     }
 
-    // CTAs with exact links — now BELOW results
-    const sterileCTA = mentionSterile ? `
-      <div style="margin:10px 0 0 0">
-        <a href="${STERILIZED_CAT}" target="_blank"
-           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
-          Browse Sterilized Body Jewelry
-        </a>
-      </div>` : '';
+    // Aftercare panel (top)
+    let aftercarePanelTop = '';
+    if (wantAftercare) {
+      const acDoc = DOCS.find(d => (d.url||'').includes('Aftercare_ep_42-1.html')) || docHit;
+      const acSnippet = acDoc ? acDoc.text.slice(0, 600) : 'Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.';
+      aftercarePanelTop = `
+        <div style="margin:4px 0 8px 0; padding:10px; border:1px solid #eee; border-radius:10px; background:#fafafa">
+          <div style="font-weight:800; margin-bottom:6px">Aftercare Essentials</div>
+          <div style="font-size:13px; line-height:1.45">${acSnippet}...</div>
+        </div>`;
+    }
 
-    const wantAftercare = /(aftercare|after care|care instructions|clean|saline|healing)/i.test(q);
-    const aftercareCTA = wantAftercare ? `
-      <div style="margin:10px 0 0 0">
-        <a href="${AFTERCARE_URL}" target="_blank"
-           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
-          Read Aftercare Instructions
-        </a>
-      </div>` : '';
+    // Direct-ask OOS notice (minimal, above footers)
+    let oosBlock = '';
+    const directOOS = oos.filter(p => looksDirectAsk(q, p.title)).slice(0,2);
+    if (directOOS.length){
+      oosBlock = `
+      <div style="margin:10px 0 6px 0; font-weight:600">Requested item (currently out of stock):</div>
+      ${directOOS.map(p => `
+        <div style="border:1px dashed #f2a; border-radius:12px; padding:10px; margin:6px 0; display:flex; gap:10px; align-items:center; opacity:.85">
+          ${p.image ? `<img src="${p.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
+          <div style="flex:1">
+            <div style="font-weight:600">${p.title} <span style="color:#b00; font-weight:700">— Out of stock</span></div>
+            ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+            <div style="margin-top:6px"><a href="${p.url}" target="_blank" style="text-decoration:underline">View product page</a></div>
+          </div>
+        </div>
+      `).join('')}`;
+    }
 
-    // Sticky bar (Sterilized) to keep CTA visible
-    const stickyCTA = mentionSterile ? `
-      <div style="position: sticky; bottom: 4px; z-index: 5; padding-top:8px">
-        <a href="${STERILIZED_CAT}" target="_blank"
-           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700; box-shadow: 0 2px 8px rgba(0,0,0,.15)">
-          Browse Sterilized Body Jewelry
-        </a>
-      </div>` : '';
-
-    // Collapsible source details to avoid pushing CTAs out of view
-    const sourceBlock = (function(){
-      if (!docHit) return '';
-      return `
-        <details style="margin:8px 0; border:1px solid #eee; border-radius:10px; padding:10px; background:#fafafa">
-          <summary style="cursor:pointer; font-weight:600">More info from: ${docHit.title}</summary>
-          <div style="display:flex; gap:10px; align-items:center; margin-top:8px">
-            ${docHit.image ? `<img src="${docHit.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
-            <div style="flex:1">
-              <div style="font-size:13px; margin-bottom:6px">${docHit.snippet}...</div>
-              <a href="${docHit.url}" target="_blank" style="text-decoration:underline">Open page</a>
+    // FOOTERS (these are intentionally LAST in the message)
+    let footer = '';
+    if (mentionSterile) {
+      // Compact top picks (3) + CTA so the bottom is always relevant
+      const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 3);
+      const compact = sterileInstock.map(p => `
+        <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+          <div style="display:flex; gap:8px; align-items:center; padding:6px 0; border-top:1px solid #f2f2f2">
+            ${p.image ? `<img src="${p.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:6px">` : ''}
+            <div style="flex:1; font-size:13px; line-height:1.25">
+              <div style="font-weight:600">${p.title}</div>
+              ${p.price ? `<div style="opacity:.85; margin-top:2px">${p.price}</div>` : ''}
             </div>
           </div>
-        </details>`;
-    })();
+        </a>
+      `).join('');
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+          <div style="font-weight:800; margin-bottom:6px">Top Sterilized Picks</div>
+          ${compact}
+          <div style="margin-top:8px">
+            <a href="${STERILIZED_CAT}" target="_blank"
+               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+              Open Full Sterilized Category
+            </a>
+          </div>
+        </div>`;
+    } else if (wantAftercare) {
+      footer = `
+        <div style="margin-top:10px; padding:10px; border:1px solid #eee; border-radius:10px; background:#fff">
+          <div style="font-weight:800; margin-bottom:6px">Aftercare Quick Tips</div>
+          <ul style="padding-left:18px; margin:0; font-size:13px; line-height:1.45">
+            <li>Rinse twice daily with sterile saline.</li>
+            <li>Don’t twist or rotate jewelry.</li>
+            <li>Sleep on clean linens; avoid pools/hot tubs for 2 weeks.</li>
+          </ul>
+          <div style="margin-top:8px">
+            <a href="${AFTERCARE_URL}" target="_blank"
+               style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700">
+              Open Full Aftercare Page
+            </a>
+          </div>
+        </div>`;
+    }
+
+    // Default general mode (when not sterile/aftercare): show up to 5 generic cards
+    let generalCards = '';
+    if (!(mentionSterile || wantAftercare)) {
+      const generalInStock = ranked.filter(p => p.instock !== false).slice(0, 5);
+      generalCards = generalInStock.map(p => `
+        <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+          <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
+            ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
+            <div style="flex:1">
+              <div style="font-weight:600">${p.title}</div>
+              ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+              <div style="margin-top:6px"><span style="background:#111;color:#fff;padding:6px 10px;border-radius:8px">View</span></div>
+            </div>
+          </div>
+        </a>
+      `).join('');
+    }
 
     const defaultBlurb = `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
 
-    // NEW ORDER: message/kb → results (gallery + oos + cards) → CTAs → sticky → details
+    // ORDER (important): TOP panels → OOS → (general cards only in general mode) → FOOTER (answer again)  ← last thing shown
     const html = `
       <div style="font-size:14px">
-        <div style="margin:6px 0">${kb || defaultBlurb}</div>
-        ${sterileGallery}
+        ${mentionSterile ? sterileGalleryTop : ''}
+        ${wantAftercare ? aftercarePanelTop : ''}
         ${oosBlock}
-        ${cards}
-        ${sterileCTA}
-        ${aftercareCTA}
-        ${stickyCTA}
-        ${sourceBlock}
-        ${safety}
+        ${generalCards}
+        ${footer}
+        ${!(mentionSterile || wantAftercare) ? `<div style="margin:6px 0; opacity:.85">${kb || defaultBlurb}</div>` : ''}
+        ${looksHowTo ? `<div style="margin:6px 0; font-size:12px; opacity:.8">Educational info only. We don’t endorse self-piercing. Consider a licensed professional.</div>` : ''}
       </div>`;
 
     res.json({ html });
@@ -417,7 +431,7 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
-// Probes for quick verification
+// Probes
 app.get('/hbj/probe', async (req, res) => {
   try {
     const type = (req.query.type || 'sterile').toString();
@@ -425,7 +439,7 @@ app.get('/hbj/probe', async (req, res) => {
     if (type === 'prokits') url = PRO_KITS_CAT;
     if (type === 'safekits') url = SAFE_KITS_CAT;
     const items = await harvestProductsFromCategory(url);
-    res.json({ ok: true, type, count: items.length, sample: items.slice(0,8) });
+    res.json({ ok: true, type, count: items.length, sample: items.slice(0,10) });
   } catch (e) {
     res.status(500).json({ ok:false, error: e.message });
   }
@@ -438,7 +452,7 @@ app.get('/hbj/health', (_,res)=>{
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot Hotfix v1.7.6 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot Hotfix v1.7.8 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
