@@ -1,6 +1,9 @@
-// server.js — HBJ Bot Hotfix v1.7.5
-// - Sterilized Jewelry button shows a gallery of products from the category (with images)
-// - Keeps: exact CTA links, price parsing, category harvesting, OOS policy
+// server.js — HBJ Bot Hotfix v1.7.6
+// Layout tweaks for visibility:
+// - Results shown first (cards/gallery), CTAs BELOW results
+// - Sticky Sterilized CTA at bottom so it doesn't scroll out of view
+// - Long page snippet in <details>
+// - Limit cards to 5
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -293,10 +296,10 @@ app.post('/hbj/chat', async (req, res) => {
       ? ranked.sort((a,b)=> (b.title.toLowerCase().includes('steril') - a.title.toLowerCase().includes('steril')) || (b.score - a.score))
       : ranked;
 
-    const inStock = sterileFirst.filter(p => p.instock !== false).slice(0, 6);
+    const inStock = sterileFirst.filter(p => p.instock !== false).slice(0, 5);
     const oos = sterileFirst.filter(p => p.instock === false).slice(0, 6);
 
-    const cards = inStock.slice(0,6).map(p => `
+    const cards = inStock.map(p => `
       <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
         <div style="border:1px solid #eee;border-radius:12px;padding:10px;margin:6px 0; display:flex; gap:10px; align-items:center">
           ${p.image ? `<img src="${p.image}" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px">` : ''}
@@ -327,24 +330,6 @@ app.post('/hbj/chat', async (req, res) => {
       `).join('')}`;
     }
 
-    // CTAs with exact links
-    const sterileCTA = mentionSterile ? `
-      <div style="margin:10px 0">
-        <a href="${STERILIZED_CAT}" target="_blank"
-           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
-          Browse Sterilized Body Jewelry
-        </a>
-      </div>` : '';
-
-    const wantAftercare = /(aftercare|after care|care instructions|clean|saline|healing)/i.test(q);
-    const aftercareCTA = wantAftercare ? `
-      <div style="margin:10px 0">
-        <a href="${AFTERCARE_URL}" target="_blank"
-           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
-          Read Aftercare Instructions
-        </a>
-      </div>` : '';
-
     // Sterile gallery (from category only), in-stock only
     let sterileGallery = '';
     if (mentionSterile && sterileHarvest.length){
@@ -366,25 +351,63 @@ app.post('/hbj/chat', async (req, res) => {
       }
     }
 
-    const defaultBlurb = `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
-    const sourceBlock = docHit ? `
-      <div style="margin:8px 0; padding:10px; background:#fafafa; border:1px solid #eee; border-radius:10px; display:flex; gap:10px; align-items:center">
-        ${docHit.image ? `<img src="${docHit.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
-        <div style="flex:1">
-          <div style="font-weight:600; margin-bottom:6px">From: <a href="${docHit.url}" target="_blank">${docHit.title}</a></div>
-          <div style="font-size:13px">${docHit.snippet}...</div>
-        </div>
+    // CTAs with exact links — now BELOW results
+    const sterileCTA = mentionSterile ? `
+      <div style="margin:10px 0 0 0">
+        <a href="${STERILIZED_CAT}" target="_blank"
+           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
+          Browse Sterilized Body Jewelry
+        </a>
       </div>` : '';
 
+    const wantAftercare = /(aftercare|after care|care instructions|clean|saline|healing)/i.test(q);
+    const aftercareCTA = wantAftercare ? `
+      <div style="margin:10px 0 0 0">
+        <a href="${AFTERCARE_URL}" target="_blank"
+           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:600">
+          Read Aftercare Instructions
+        </a>
+      </div>` : '';
+
+    // Sticky bar (Sterilized) to keep CTA visible
+    const stickyCTA = mentionSterile ? `
+      <div style="position: sticky; bottom: 4px; z-index: 5; padding-top:8px">
+        <a href="${STERILIZED_CAT}" target="_blank"
+           style="display:inline-block; background:#111; color:#fff; padding:10px 14px; border-radius:10px; text-decoration:none; font-weight:700; box-shadow: 0 2px 8px rgba(0,0,0,.15)">
+          Browse Sterilized Body Jewelry
+        </a>
+      </div>` : '';
+
+    // Collapsible source details to avoid pushing CTAs out of view
+    const sourceBlock = (function(){
+      if (!docHit) return '';
+      return `
+        <details style="margin:8px 0; border:1px solid #eee; border-radius:10px; padding:10px; background:#fafafa">
+          <summary style="cursor:pointer; font-weight:600">More info from: ${docHit.title}</summary>
+          <div style="display:flex; gap:10px; align-items:center; margin-top:8px">
+            ${docHit.image ? `<img src="${docHit.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px">` : ''}
+            <div style="flex:1">
+              <div style="font-size:13px; margin-bottom:6px">${docHit.snippet}...</div>
+              <a href="${docHit.url}" target="_blank" style="text-decoration:underline">Open page</a>
+            </div>
+          </div>
+        </details>`;
+    })();
+
+    const defaultBlurb = `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
+
+    // NEW ORDER: message/kb → results (gallery + oos + cards) → CTAs → sticky → details
     const html = `
       <div style="font-size:14px">
-        ${sourceBlock}
         <div style="margin:6px 0">${kb || defaultBlurb}</div>
-        ${sterileCTA}
         ${sterileGallery}
-        ${aftercareCTA}
         ${oosBlock}
-        ${cards || `<div>No in-stock matches.</div>`}
+        ${cards}
+        ${sterileCTA}
+        ${aftercareCTA}
+        ${stickyCTA}
+        ${sourceBlock}
+        ${safety}
       </div>`;
 
     res.json({ html });
@@ -415,7 +438,7 @@ app.get('/hbj/health', (_,res)=>{
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot Hotfix v1.7.5 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot Hotfix v1.7.6 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
