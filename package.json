@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.7.4",
-  "description": "HBJ chatbot backend — hotfix v1.7.4 (Aftercare CTA exact link + prior fixes)",
+  "version": "1.7.5",
+  "description": "HBJ chatbot backend — hotfix v1.7.5 (Sterilized gallery under CTA + prior fixes)",
   "type": "module",
   "main": "server.js",
   "scripts": {

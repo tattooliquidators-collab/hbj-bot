@@ -1,6 +1,6 @@
-// server.js — HBJ Bot Hotfix v1.7.4
-// - Adds Aftercare CTA linking EXACTLY to Aftercare_ep_42-1.html
-// - Preserves v1.7.3 (Sterilized CTA exact link + price parser + category harvesting + OOS policy)
+// server.js — HBJ Bot Hotfix v1.7.5
+// - Sterilized Jewelry button shows a gallery of products from the category (with images)
+// - Keeps: exact CTA links, price parsing, category harvesting, OOS policy
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -195,7 +195,7 @@ async function harvestProductsFromCategory(categoryUrl){
       const href = $(a).attr('href') || '';
       if (looksProductHref(href)) links.add(abs(href, categoryUrl));
     });
-    for (const link of Array.from(links).slice(0, 24)) {
+    for (const link of Array.from(links).slice(0, 30)) {
       try {
         const ph = await get(link);
         const $$ = cheerio.load(ph);
@@ -278,10 +278,11 @@ app.post('/hbj/chat', async (req, res) => {
     // Products via on-demand search
     let items = await searchProductsOnDemand(q);
 
-    // Sterile preference: harvest sterilized category if query mentions steril*
+    // Sterile: always harvest the category when mentioned and build a dedicated gallery
     const mentionSterile = /steril/i.test(q);
+    let sterileHarvest = [];
     if (mentionSterile) {
-      const sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
+      sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
       const urls = new Set(items.map(i=>i.url));
       for (const it of sterileHarvest) if (!urls.has(it.url)) items.push(it);
     }
@@ -344,6 +345,27 @@ app.post('/hbj/chat', async (req, res) => {
         </a>
       </div>` : '';
 
+    // Sterile gallery (from category only), in-stock only
+    let sterileGallery = '';
+    if (mentionSterile && sterileHarvest.length){
+      const sterileInstock = sterileHarvest.filter(p => p.instock !== false).slice(0, 8);
+      if (sterileInstock.length){
+        sterileGallery = `
+          <div style="margin:8px 0; font-weight:700">Sterilized Body Jewelry</div>
+          <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px">
+            ${sterileInstock.map(p => `
+              <a href="${p.url}" target="_blank" style="text-decoration:none;color:inherit">
+                <div style="border:1px solid #eee;border-radius:12px;padding:10px;">
+                  ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+                  <div style="font-weight:600; margin-top:8px; font-size:13px; line-height:1.2">${p.title}</div>
+                  ${p.price ? `<div style="opacity:.85; margin-top:4px">${p.price}</div>` : ''}
+                </div>
+              </a>
+            `).join('')}
+          </div>`;
+      }
+    }
+
     const defaultBlurb = `Tell me the <b>piercing</b> (tragus, daith, septum) and <b>gauge</b> to tighten results.`;
     const sourceBlock = docHit ? `
       <div style="margin:8px 0; padding:10px; background:#fafafa; border:1px solid #eee; border-radius:10px; display:flex; gap:10px; align-items:center">
@@ -359,6 +381,7 @@ app.post('/hbj/chat', async (req, res) => {
         ${sourceBlock}
         <div style="margin:6px 0">${kb || defaultBlurb}</div>
         ${sterileCTA}
+        ${sterileGallery}
         ${aftercareCTA}
         ${oosBlock}
         ${cards || `<div>No in-stock matches.</div>`}
@@ -392,7 +415,7 @@ app.get('/hbj/health', (_,res)=>{
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot Hotfix v1.7.4 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot Hotfix v1.7.5 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
