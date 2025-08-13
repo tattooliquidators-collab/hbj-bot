@@ -1,12 +1,9 @@
 
-// server.js — HBJ Bot v1.9.8
-// Changes from 1.9.7:
-//  • All product/category/course/aftercare/shipping CTAs rendered as <form> GET submits (target=_blank).
-//    This bypasses platforms that rewrite <a href>. No internal /hbj/... links in UI.
-//  • High-contrast inline styles with !important.
-//  • One‑word kit intents (nose, ear, nipple, clit, genital, etc.).
-//  • Out‑of‑stock products hidden from recs; Course still allowed as exception via HEAD check.
-//  • Perf caching retained.
+// server.js — HBJ Bot v1.9.9
+// Fix: guard kit search to prevent 500s and always render HTML
+//  • searchProducts() now wrapped in try/catch; on failure falls back to PRO_KITS_CAT scrape
+//  • composeKitQuestion/composeKitType never throw; friendly empty-states
+//  • Retains form-based CTAs (can't be rewritten), one-word kit intents, OOS filtering
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -14,7 +11,6 @@ import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import compression from 'compression';
-
 import fs from 'fs';
 
 dotenv.config();
@@ -303,68 +299,94 @@ function cardHTML(p){
 
 // ---------- Composers ----------
 async function composeKitQuestion(){
-  const homeKits = await harvestHomeSpecialKits();
-  const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
-  const grid = kitsInStock.length ? `
-    <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
-    <div class="hbj-grid">
-      ${kitsInStock.map(p => cardHTML(p)).join('')}
-    </div>` : ``;
-  const footer = `
-    <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
-      <div style="font-weight:900;">What kind of piercing kit are you looking for?</div>
-      <div style="font-size:12px;color:#333">Reply with one word: nose, ear, septum, nipple, clit, genital, tongue…</div>
-    </div>`;
-  return shell(`${grid}${footer}`);
+  try {
+    const homeKits = await harvestHomeSpecialKits();
+    const kitsInStock = (homeKits||[]).filter(p => p.instock !== false).slice(0, 10);
+    const grid = kitsInStock.length ? `
+      <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
+      <div class="hbj-grid">
+        ${kitsInStock.map(p => cardHTML(p)).join('')}
+      </div>` : ``;
+    const footer = `
+      <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
+        <div style="font-weight:900;">What kind of piercing kit are you looking for?</div>
+        <div style="font-size:12px;color:#333">Reply with one word: nose, ear, septum, nipple, clit, genital, tongue…</div>
+      </div>`;
+    return shell(`${grid}${footer}`);
+  } catch (e) {
+    return shell(`<div>What kind of piercing kit are you looking for? Reply with one word: nose, ear, nipple, septum…</div>`);
+  }
 }
 
 async function searchProducts(q){
-  const url = `${SITE}/search.asp?keyword=${encodeURIComponent(q)}`;
-  const html = await get(url, 5*60*1000);
-  const $ = cheerio.load(html);
-  let items = parseListing($, url);
-  // Enrich a few
-  const enrich = items.slice(0, 8).map(it => it.url);
-  const pages = await Promise.all(enrich.map(async (link) => {
-    try{
-      const ph = await get(link, 20*60*1000);
-      const $$ = cheerio.load(ph);
-      const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
-      const price = extractPrice($$);
-      const image = extractImage($$, link);
-      const instock = detectStock($$);
-      return { title, url: link, price, image, instock };
-    }catch{ return null; }
-  }));
-  const byUrl = new Map(items.map(it => [it.url, it]));
-  for (const p of pages) if (p) byUrl.set(p.url, { ...byUrl.get(p.url), ...p });
-  return Array.from(byUrl.values());
+  try {
+    const url = `${SITE}/search.asp?keyword=${encodeURIComponent(q)}`;
+    const html = await get(url, 5*60*1000);
+    const $ = cheerio.load(html);
+    let items = parseListing($, url);
+    // Enrich a few
+    const enrich = items.slice(0, 8).map(it => it.url);
+    const pages = await Promise.all(enrich.map(async (link) => {
+      try{
+        const ph = await get(link, 20*60*1000);
+        const $$ = cheerio.load(ph);
+        const title = cleanText($$('h1').first().text()) || cleanText($$('title').first().text()) || 'Product';
+        const price = extractPrice($$);
+        const image = extractImage($$, link);
+        const instock = detectStock($$);
+        return { title, url: link, price, image, instock };
+      }catch{ return null; }
+    }));
+    const byUrl = new Map(items.map(it => [it.url, it]));
+    for (const p of pages) if (p) byUrl.set(p.url, { ...byUrl.get(p.url), ...p });
+    return Array.from(byUrl.values());
+  } catch (e) {
+    // Fallback: use Pro Kits category and keyword filter
+    try {
+      const html = await get(PRO_KITS_CAT, 10*60*1000);
+      const $ = cheerio.load(html);
+      let items = parseListing($, PRO_KITS_CAT);
+      const ql = (q||'').toLowerCase();
+      items = items.filter(p => /kit/i.test(p.title||'') && p.title.toLowerCase().includes(ql.split(' ')[0]||''));
+      return items;
+    } catch {
+      return [];
+    }
+  }
 }
 
 async function composeKitType(word){
-  const items0 = await searchProducts(`${word} piercing kit`);
-  let items = items0.filter(p => /kit/i.test(p.title||'')).filter(p => p.instock !== false).slice(0, 12);
-  const grid = items.length ? `
-    <div style="margin:4px 0 8px 0; font-weight:800">${word.charAt(0).toUpperCase()+word.slice(1)} Piercing Kits</div>
-    <div class="hbj-grid">
-      ${items.map(p => cardHTML(p)).join('')}
-    </div>` : `<div>No in-stock ${word} kits found right now. Try another type.</div>`;
-  return shell(grid);
+  try {
+    const items0 = await searchProducts(`${word} piercing kit`);
+    let items = items0.filter(p => /kit/i.test(p.title||'')).filter(p => p.instock !== false).slice(0, 12);
+    const grid = items.length ? `
+      <div style="margin:4px 0 8px 0; font-weight:800">${word.charAt(0).toUpperCase()+word.slice(1)} Piercing Kits</div>
+      <div class="hbj-grid">
+        ${items.map(p => cardHTML(p)).join('')}
+      </div>` : `<div>No in-stock ${word} kits found right now. Try another type.</div>`;
+    return shell(grid);
+  } catch (e) {
+    return shell(`<div>Couldn’t load ${word} kits right now. Try again in a bit or open ${formBtn(PRO_KITS_CAT, 'Professional Kits')}</div>`);
+  }
 }
 
 async function composeSterile(){
-  const sterile = await harvestProductsFromCategory(STERILIZED_CAT);
-  const sterileInstock = (sterile||[]).filter(p => p.instock !== false).slice(0, 10);
-  if (!sterileInstock.length) return shell(`<div>No in-stock sterilized jewelry found right now.</div>`);
-  const grid = `
-    <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
-    <div class="hbj-grid">
-      ${sterileInstock.map(p => cardHTML(p)).join('')}
-    </div>
-    <div style="margin-top:8px">
-      ${formBtn(STERILIZED_CAT, 'Open Full Sterilized Category')}
-    </div>`;
-  return shell(grid);
+  try {
+    const sterile = await harvestProductsFromCategory(STERILIZED_CAT);
+    const sterileInstock = (sterile||[]).filter(p => p.instock !== false).slice(0, 10);
+    if (!sterileInstock.length) return shell(`<div>No in-stock sterilized jewelry found right now.</div>`);
+    const grid = `
+      <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
+      <div class="hbj-grid">
+        ${sterileInstock.map(p => cardHTML(p)).join('')}
+      </div>
+      <div style="margin-top:8px">
+        ${formBtn(STERILIZED_CAT, 'Open Full Sterilized Category')}
+      </div>`;
+    return shell(grid);
+  } catch (e) {
+    return shell(formBtn(STERILIZED_CAT, 'Open Full Sterilized Category'));
+  }
 }
 
 async function composeAftercare(){
@@ -438,12 +460,12 @@ app.post('/hbj/chat', async (req, res) => {
     cacheSet(CACHE.chat, key, html);
     res.json({ html });
   } catch (e) {
-    console.error('Chat error:', e);
-    res.status(500).json({ html: 'Server error. Try again shortly.' });
+    // Never leak a 500 into the chat; provide a safe fallback
+    res.json({ html: shell(`<div>Couldn’t load results right now. Try again or open ${formBtn(PRO_KITS_CAT, 'Professional Kits')}</div>`) });
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.8' }));
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.9' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
