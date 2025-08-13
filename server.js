@@ -1,10 +1,12 @@
 
-// server.js — HBJ Bot v1.9.6
-// Changes:
-//  • UI uses DIRECT STORE LINKS ONLY (no /hbj/out, no /hbj/course in anchors) → eliminates 404 from wrong host
-//  • Strong inline styles with !important on CTAs/links for readability
-//  • 1‑word kit intents (nose, ear, nipple, clit, genital, etc.)
-//  • Perf caching retained; course link HEAD-checked server‑side to avoid dead URL
+// server.js — HBJ Bot v1.9.8
+// Changes from 1.9.7:
+//  • All product/category/course/aftercare/shipping CTAs rendered as <form> GET submits (target=_blank).
+//    This bypasses platforms that rewrite <a href>. No internal /hbj/... links in UI.
+//  • High-contrast inline styles with !important.
+//  • One‑word kit intents (nose, ear, nipple, clit, genital, etc.).
+//  • Out‑of‑stock products hidden from recs; Course still allowed as exception via HEAD check.
+//  • Perf caching retained.
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -12,6 +14,7 @@ import * as cheerio from 'cheerio';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import compression from 'compression';
+
 import fs from 'fs';
 
 dotenv.config();
@@ -182,6 +185,7 @@ function parseListing($, baseUrl){
   return items.filter(it => it.title && it.url).slice(0, 24);
 }
 
+// ---------- Harvesters ----------
 async function harvestProductsFromCategory(categoryUrl){
   const cached = cacheGet(CACHE.category, categoryUrl, 15*60*1000);
   if (cached) return cached;
@@ -263,17 +267,38 @@ function shell(body){
       .hbj-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
       @media (max-width:520px) { .hbj-grid { grid-template-columns: repeat(2, 1fr) !important; } }
       .hbj-card { border:1px solid #eee; border-radius:12px; padding:10px; background:#fff; }
-      .hbj-title { font-weight:700; margin-top:8px; font-size:13px; line-height:1.25; color:#111; }
+      .hbj-title { font-weight:800; margin-top:8px; font-size:13px; line-height:1.25; color:#111; }
+      .hbj-plain { font-size:12px; color:#333; word-break:break-all; }
     </style>`;
   return `<div style="font-size:14px">${style}${body}</div>`;
 }
-function cta(href, label){
-  const u = utmize(href, 'cta');
-  return `<a href="${u}" target="_blank" rel="nofollow noopener" style="display:inline-block;background:#0b5fff!important;color:#fff!important;padding:10px 14px;border-radius:10px;text-decoration:none!important;font-weight:800!important;box-shadow:0 1px 0 rgba(0,0,0,.1);">${label}</a>`;
+
+// FORM-BASED CTAS (immune to href rewriting)
+function formBtn(url, label){
+  const u = utmize(url,'cta');
+  return `
+    <form action="${u}" method="GET" target="_blank" style="display:inline">
+      <button type="submit"
+        style="background:#0b5fff!important;color:#fff!important;padding:10px 14px;border-radius:10px;
+               font-weight:900!important;border:0;cursor:pointer;text-decoration:none!important;box-shadow:0 1px 0 rgba(0,0,0,.1)">
+        ${label}
+      </button>
+    </form>
+    <div class="hbj-plain">Link: ${u}</div>`;
 }
-function linkTxt(href, label){
-  const u = utmize(href, 'link');
-  return `<a href="${u}" target="_blank" rel="nofollow noopener" style="color:#0b5fff!important;text-decoration:underline!important;font-weight:700!important;">${label}</a>`;
+
+function cardHTML(p){
+  const u = utmize(p.url,'card');
+  return `
+    <form action="${u}" method="GET" target="_blank" style="display:block;text-decoration:none;color:inherit">
+      <button type="submit" style="all:unset;display:block;cursor:pointer">
+        <div class="hbj-card">
+          ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
+          <div class="hbj-title">${p.title||''}</div>
+          ${p.price ? `<div style="opacity:.9;margin-top:4px">${p.price}</div>` : ''}
+        </div>
+      </button>
+    </form>`;
 }
 
 // ---------- Composers ----------
@@ -283,19 +308,11 @@ async function composeKitQuestion(){
   const grid = kitsInStock.length ? `
     <div style="margin:4px 0 8px 0; font-weight:800">Piercing Kits — Home Specials</div>
     <div class="hbj-grid">
-      ${kitsInStock.map(p => `
-        <a href="${utmize(p.url,'kit_card')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
-          <div class="hbj-card">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
-            <div class="hbj-title">${p.title}</div>
-            ${p.price ? `<div style="opacity:.9;margin-top:4px">${p.price}</div>` : ''}
-          </div>
-        </a>
-      `).join('')}
+      ${kitsInStock.map(p => cardHTML(p)).join('')}
     </div>` : ``;
   const footer = `
     <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
-      <div style="font-weight:800;">What kind of piercing kit are you looking for?</div>
+      <div style="font-weight:900;">What kind of piercing kit are you looking for?</div>
       <div style="font-size:12px;color:#333">Reply with one word: nose, ear, septum, nipple, clit, genital, tongue…</div>
     </div>`;
   return shell(`${grid}${footer}`);
@@ -330,15 +347,7 @@ async function composeKitType(word){
   const grid = items.length ? `
     <div style="margin:4px 0 8px 0; font-weight:800">${word.charAt(0).toUpperCase()+word.slice(1)} Piercing Kits</div>
     <div class="hbj-grid">
-      ${items.map(p => `
-        <a href="${utmize(p.url,'kit_type_'+encodeURIComponent(word))}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
-          <div class="hbj-card">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
-            <div class="hbj-title">${p.title}</div>
-            ${p.price ? `<div style="opacity:.9;margin-top:4px">${p.price}</div>` : ''}
-          </div>
-        </a>
-      `).join('')}
+      ${items.map(p => cardHTML(p)).join('')}
     </div>` : `<div>No in-stock ${word} kits found right now. Try another type.</div>`;
   return shell(grid);
 }
@@ -350,18 +359,12 @@ async function composeSterile(){
   const grid = `
     <div style="margin:4px 0 8px 0; font-weight:800">Sterilized Body Jewelry</div>
     <div class="hbj-grid">
-      ${sterileInstock.map(p => `
-        <a href="${utmize(p.url,'sterile_card')}" target="_blank" rel="nofollow noopener" style="text-decoration:none;color:inherit">
-          <div class="hbj-card">
-            ${p.image ? `<img src="${p.image}" alt="" style="width:100%;height:120px;object-fit:cover;border-radius:8px">` : ''}
-            <div class="hbj-title">${p.title}</div>
-            ${p.price ? `<div style="opacity:.9;margin-top:4px">${p.price}</div>` : ''}
-          </div>
-        </a>
-      `).join('')}
+      ${sterileInstock.map(p => cardHTML(p)).join('')}
+    </div>
+    <div style="margin-top:8px">
+      ${formBtn(STERILIZED_CAT, 'Open Full Sterilized Category')}
     </div>`;
-  const footer = `<div style="margin-top:8px">${cta(STERILIZED_CAT, 'Open Full Sterilized Category')}</div>`;
-  return shell(`${grid}${footer}`);
+  return shell(grid);
 }
 
 async function composeAftercare(){
@@ -370,7 +373,10 @@ async function composeAftercare(){
       <div style="font-weight:800; margin-bottom:6px">Aftercare Essentials</div>
       <div style="font-size:13px; line-height:1.45">Rinse twice daily with sterile saline. Avoid twisting the jewelry. Sleep on clean linens and avoid pools/hot tubs for at least 2 weeks.</div>
     </div>`;
-  const foot = `<div style="margin-top:8px">${cta(AFTERCARE_URL, 'Open Full Aftercare Page')}</div>`;
+  const foot = `
+    <div style="margin-top:8px">
+      ${formBtn(AFTERCARE_URL, 'Open Full Aftercare Page')}
+    </div>`;
   return shell(`${top}${foot}`);
 }
 
@@ -382,7 +388,10 @@ async function composeShipping(){
         Most orders ship within 1 business day. Returns are limited to unopened/unused items within 7 days; sterile kits are final sale.
       </div>
     </div>`;
-  const foot = `<div style="margin-top:8px">${cta(SHIPPING_URL, 'Open Shipping & Returns Page')}</div>`;
+  const foot = `
+    <div style="margin-top:8px">
+      ${formBtn(SHIPPING_URL, 'Open Shipping & Returns Page')}
+    </div>`;
   return shell(`${top}${foot}`);
 }
 
@@ -395,11 +404,12 @@ async function composeCourse(){
       <div style="font-weight:800; margin-bottom:6px">Master Body Piercing Course</div>
       <div style="font-size:13px; line-height:1.45">Per owner exception: opens even if unavailable. ${ok ? '' : '(Course page temporarily unavailable — showing kits category.)'}</div>
     </div>`;
-  const foot = `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-    ${cta(target, ok ? 'Go to Course' : 'See Professional Kits')}
-    ${cta(ABOUT_URL, 'About Us')}
-    ${cta(CONTACT_URL, 'Contact / Interest')}
-  </div>`;
+  const foot = `
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+      ${formBtn(target, ok ? 'Go to Course' : 'See Professional Kits')}
+      ${formBtn(ABOUT_URL, 'About Us')}
+      ${formBtn(CONTACT_URL, 'Contact / Interest')}
+    </div>`;
   return shell(`${top}${foot}`);
 }
 
@@ -433,7 +443,7 @@ app.post('/hbj/chat', async (req, res) => {
   }
 });
 
-app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.6' }));
+app.get('/hbj/health', (_,res)=> res.json({ ok:true, version: '1.9.8' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=> console.log(`HBJ Assistant running on :${PORT}`));
