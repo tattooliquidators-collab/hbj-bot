@@ -1,8 +1,7 @@
-// server.js — HBJ Bot v1.8.3
-// New: 'kit' intent pulls Piercing Kits from the Home page "Home Specials"/featured area,
-// renders a grid (images + prices) and ends with the question:
-//   "What kind of piercing kit are you looking for?"
-// Preserves: answer-last guarantee; OOS shown only on direct ask; intents for sterile/aftercare/shipping/course.
+// server.js — HBJ Bot v1.8.4
+// Change: For the "kit" intent, remove the Ear/Nose/Septrum/Tragus chips.
+// Footer now shows ONLY the question: "What kind of piercing kit are you looking for?"
+// Everything else unchanged (answer-last, intents, OOS policy, etc.)
 
 import express from 'express';
 import fetch from 'node-fetch';
@@ -237,8 +236,7 @@ async function harvestProductsFromCategory(categoryUrl){
   return out;
 }
 
-// Pulls kits that appear on the home page "Home Specials"/featured area.
-// Approach: collect all product links on the home page, fetch titles, filter where title includes "kit".
+// Pull kits from Home "Home Specials"/featured area
 async function harvestHomeSpecialKits(){
   const out = [];
   try {
@@ -248,12 +246,10 @@ async function harvestHomeSpecialKits(){
     $('a').each((_, a) => {
       const href = $(a).attr('href') || '';
       const text = cleanText($(a).text() || '');
-      // bias: if text mentions kit or it's within a specials/feature area, include
       if (looksProductHref(href) && (/kit/i.test(text) || $(a).closest('section, div').text().toLowerCase().includes('home specials') || $(a).closest('section, div').text().toLowerCase().includes('special'))) {
         links.add(abs(href, HOME));
       }
     });
-    // Fallback: if few found, just grab all product-like links from home
     if (links.size < 6) {
       $('a').each((_, a) => {
         const href = $(a).attr('href') || '';
@@ -273,7 +269,6 @@ async function harvestHomeSpecialKits(){
       } catch {}
     }
   } catch {}
-  // Deduplicate by URL
   const seen = new Set(); const uniq = [];
   for (const p of out) { if (seen.has(p.url)) continue; seen.add(p.url); uniq.push(p); }
   return uniq;
@@ -321,7 +316,7 @@ function scoreAgainstQuery(q, p){
   for (const k in SYN) if (SYN[k].some(tk => ql.includes(tk) && t.includes(tk))) s += 2;
   const g = parseGauge(q); if (g && t.includes(`${g}g`)) s += 3;
   if (/kit\b/i.test(ql) && /kit\b/i.test(t)) s += 4;
-  if (/steril/i.test(ql) && /steril/i.test(t)) s += 6; // boost sterile
+  if (/steril/i.test(ql) && /steril/i.test(t)) s += 6;
   if (/course|training|class/i.test(ql) && /course|training|class/i.test(t)) s += 5;
   return s;
 }
@@ -348,19 +343,16 @@ app.post('/hbj/chat', async (req, res) => {
 
     const it = intentOf(q);
 
-    // Docs & KB
     const norm = q.toLowerCase();
     const docHit = searchDocs(q);
     let kb = null;
     for (const key of Object.keys((RULES.faqs||{}))) if (norm.includes(key)) { kb = RULES.faqs[key]; break; }
 
-    // Products (only used in general/sterile)
     let items = [];
     if (it === 'general' || it === 'sterile') {
       items = await searchProductsOnDemand(q);
     }
 
-    // Sterile harvest
     let sterileHarvest = [];
     if (it === 'sterile') {
       sterileHarvest = await harvestProductsFromCategory(STERILIZED_CAT);
@@ -368,7 +360,6 @@ app.post('/hbj/chat', async (req, res) => {
       for (const itx of sterileHarvest) if (!urls.has(itx.url)) items.push(itx);
     }
 
-    // Home Specials kits
     let homeKits = [];
     if (it === 'kit') {
       homeKits = await harvestHomeSpecialKits();
@@ -377,7 +368,6 @@ app.post('/hbj/chat', async (req, res) => {
     const ranked = items.map(p => ({...p, score: scoreAgainstQuery(q, p)})).sort((a,b)=>b.score-a.score);
     const oos = ranked.filter(p => p.instock === false).slice(0, 4);
 
-    // Panels by intent
     let topPanel = '';
     let footer = '';
     let generalCards = '';
@@ -399,18 +389,12 @@ app.post('/hbj/chat', async (req, res) => {
             `).join('')}
           </div>`;
       } else {
-        topPanel = `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing (ear, nose, septum, tragus) and I’ll show options.</div>`;
+        topPanel = `<div style="margin:4px 0 8px 0;">Looking for a piercing kit? Tell me the piercing and I’ll show options.</div>`;
       }
-      // Footer question is intentionally LAST (answer-last)
+      // Footer: ONLY the question (no options)
       footer = `
         <div style="margin-top:10px; padding:10px; border:1px dashed #ddd; border-radius:10px; background:#fff">
-          <div style="font-weight:700; margin-bottom:6px">What kind of piercing kit are you looking for?</div>
-          <div style="display:flex; flex-wrap:wrap; gap:8px; font-size:13px;">
-            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Ear</span>
-            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Nose</span>
-            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Septum</span>
-            <span style="border:1px solid #eee; padding:6px 10px; border-radius:999px;">Tragus</span>
-          </div>
+          <div style="font-weight:700;">What kind of piercing kit are you looking for?</div>
         </div>`;
     } else if (it === 'sterile') {
       const sterileInstock = (sterileHarvest||[]).filter(p => p.instock !== false).slice(0, 10);
@@ -589,13 +573,13 @@ app.get('/hbj/probe', async (req, res) => {
 });
 
 app.get('/hbj/health', (_,res)=>{
-  res.json({ ok:true, docs: DOCS.length, version: '1.8.3' });
+  res.json({ ok:true, docs: DOCS.length, version: '1.8.4' });
 });
 
 // ---------- Boot ----------
 (async function boot(){
   await loadPages();
-  console.log('HBJ Bot v1.8.3 booted. Docs:', DOCS.length);
+  console.log('HBJ Bot v1.8.4 booted. Docs:', DOCS.length);
 })();
 
 const PORT = process.env.PORT || 3000;
