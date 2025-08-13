@@ -1,7 +1,7 @@
 {
   "name": "hbj-bot",
-  "version": "1.9.2",
-  "description": "HBJ chatbot backend \u2014 v1.9.2 (perf: caching, keep-alive, limited concurrency, gzip)",
+  "version": "1.9.4",
+  "description": "HBJ chatbot backend \u2014 v1.9.4 (absolute links, high-contrast CTAs, 1\u2011word kit intents)",
   "type": "module",
   "main": "server.js",
   "scripts": {
